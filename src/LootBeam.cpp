@@ -1029,8 +1029,15 @@ namespace wxl::scripts::loot_beam
 
         // The largest beam grid; a beacon close enough to fill the screen uses all of it, and a distant
         // one uses fewer rows (see the LOD in QueueBeamColumn).
-        constexpr int kBeamMaxRows = 8;
-        constexpr int kBeamMaxCols = 4;
+        constexpr int kBeamMaxRows = 12;
+        constexpr int kBeamMaxCols = 5;
+
+        // Per-frame cap on the costly screen-space model picks. Terrain traces are cheap and are not
+        // capped; this only stops a camp full of corpses from turning the model half of the test into
+        // hundreds of cursor searches in one frame. When it runs out the terrain trace still carries the
+        // shape, so the beam just loses its finer model silhouette for the rest of that frame.
+        constexpr int kModelPickBudget = 800;
+        int g_modelPicksLeft = kModelPickBudget;
 
         // True when the shaft's bounding sphere may cross the view frustum. The planes come from the
         // engine's own combined view-projection (cam::GetViewProj), so a beacon this rejects would have
@@ -1115,6 +1122,8 @@ namespace wxl::scripts::loot_beam
         // count the ground under the beam a second time.
         bool ModelBlocked(const float eye[3], const float to[3], float clearance)
         {
+            if (g_modelPicksLeft <= 0) return false;
+            --g_modelPicksLeft;
             world::WorldHit hit;
             if (!PickProjected(eye, to, hit) || hit.type != 2) return false;
             return HitIsCover(eye, to, hit, clearance);
@@ -1161,8 +1170,8 @@ namespace wxl::scripts::loot_beam
 
             int rows = kBeamMaxRows;
             int cols = kBeamMaxCols;
-            if (dist > 150.0f)      { rows = 4; cols = 3; }
-            else if (dist > 80.0f)  { rows = 6; cols = 4; }
+            if (dist > 150.0f)      { rows = 5; cols = 4; }
+            else if (dist > 80.0f)  { rows = 8; cols = 5; }
 
             // minBaseZ clips the foot of the shaft up to the cover it stands behind, so the beam is
             // always there but the buried part never draws through the hill or wall in front of it.
@@ -1179,15 +1188,8 @@ namespace wxl::scripts::loot_beam
             {
                 const float t = float(r) / float(rows);
                 const float w = fmaxf(style.beamWidth * (1.0f - 0.55f * t), minHalfWidth);
-                float v = BeamVertical(t);
+                const float v = BeamVertical(t);
                 zs[r] = baseZ + (topZ - baseZ) * t;
-                if (occlude)
-                {
-                    // A band the eye cannot reach contributes nothing, so the shaft carries gaps
-                    // exactly where cover is in front of it instead of drawing over the cover.
-                    const float to[3] = { pos[0], pos[1], zs[r] };
-                    if (LineBlocked(camera, to, 2.0f, true)) v = 0.0f;
-                }
 
                 for (int c = 0; c <= cols; ++c)
                 {
@@ -1195,7 +1197,19 @@ namespace wxl::scripts::loot_beam
                     const float h = SoftEdge(fabsf(u));
                     xs[r][c] = pos[0] + sx * (w * u);
                     ys[r][c] = pos[1] + sy * (w * u);
-                    cs[r][c] = PackTint(style.beamAlpha * v * h * alphaScale, rgb,
+
+                    // Per-vertex line of sight: a ray to every grid vertex, not one per row, so the cut
+                    // follows the cover's silhouette across the beam's width instead of blanking a whole
+                    // band. Gouraud interpolation then fades across one cell, which reads as a soft edge
+                    // rather than a stair-step. The model pick is the costly half, so it is only asked for
+                    // while the beam is close enough for its silhouette to span real pixels.
+                    float vis = 1.0f;
+                    if (occlude)
+                    {
+                        const float to[3] = { xs[r][c], ys[r][c], zs[r] };
+                        if (LineBlocked(camera, to, 2.0f, dist < 120.0f)) vis = 0.0f;
+                    }
+                    cs[r][c] = PackTint(style.beamAlpha * v * h * vis * alphaScale, rgb,
                                         0.45f * h * (1.0f - 0.3f * t));
                 }
             }
@@ -1415,6 +1429,7 @@ namespace wxl::scripts::loot_beam
         // under the next one.
         beacon_gfx::Clear();
         haveWorldMatrices_ = false; // recapture this frame's world matrices at the M2 pass
+        g_modelPicksLeft   = kModelPickBudget;
 
         // Derive the world state live rather than trusting OnWorldEnter alone: a module loaded after
         // the client was already in-world would otherwise never see the enter event and stay dark.
