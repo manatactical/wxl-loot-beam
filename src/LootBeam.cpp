@@ -23,7 +23,6 @@
 #include "game/Gfx.hpp"
 #include "game/Pick.hpp"
 #include "game/Script.hpp"
-#include "game/Unit.hpp"
 #include "game/World.hpp"
 
 #include <windows.h>
@@ -40,7 +39,6 @@ namespace wxl::scripts::loot_beam
     namespace gfx   = wxl::game::gfx;
     namespace gx    = wxl::game::gx;
     namespace world = wxl::game::world;
-    namespace unit  = wxl::game::unit;
     namespace cam   = wxl::game::camera;
     namespace script = wxl::game::script;
 
@@ -1035,13 +1033,6 @@ namespace wxl::scripts::loot_beam
         constexpr int kBeamMaxRows = 64;
         constexpr int kBeamMaxCols = 4;
 
-        // Per-frame cap on the costly screen-space model picks. Terrain traces are cheap and are not
-        // capped; this only stops a camp full of corpses from turning the model half of the test into
-        // hundreds of cursor searches in one frame. When it runs out the terrain trace still carries the
-        // shape, so the beam just loses its finer model silhouette for the rest of that frame.
-        constexpr int kModelPickBudget = 1200;
-        int g_modelPicksLeft = kModelPickBudget;
-
         // True when the shaft's bounding sphere may cross the view frustum. The planes come from the
         // engine's own combined view-projection (cam::GetViewProj), so a beacon this rejects would have
         // drawn no pixel; a conservative sphere test never drops one that is even partly visible. It is
@@ -1101,43 +1092,6 @@ namespace wxl::scripts::loot_beam
             if (dev.GetViewport(&vp) < 0 || vp.width == 0 || vp.height == 0) return false;
             w = float(vp.width); h = float(vp.height);
             return true;
-        }
-
-        // Projects a world point to a device pixel and runs the engine's cursor pick through it. The
-        // pick is the only ray in the SDK that tests model geometry; the world intersect behind
-        // TraceLine tests terrain and WMO only, so a tree or a rock is invisible to it. False when the
-        // device/camera is not ready, the point is behind the eye, or the ray misses everything.
-        bool PickProjected(const float eye[3], const float to[3], world::WorldHit& hit)
-        {
-            float vpW = 0.0f, vpH = 0.0f;
-            if (!ViewportSize(vpW, vpH)) return false;
-
-            const float* view = cam::GetView();
-            const float* proj = cam::GetProjection();
-            const float px = to[0] - eye[0], py = to[1] - eye[1], pz = to[2] - eye[2];
-            const float vx = px * view[0] + py * view[4] + pz * view[8] + view[12];
-            const float vy = px * view[1] + py * view[5] + pz * view[9] + view[13];
-            const float vz = px * view[2] + py * view[6] + pz * view[10] + view[14];
-            const float cw = vx * proj[3] + vy * proj[7] + vz * proj[11] + proj[15];
-            if (cw <= 1.0e-3f) return false; // behind the eye: no pixel to shoot through
-
-            const float cx = vx * proj[0] + vy * proj[4] + vz * proj[8] + proj[12];
-            const float cy = vx * proj[1] + vy * proj[5] + vz * proj[9] + proj[13];
-            const float ddcX = (0.5f * cx / cw + 0.5f) * vpW;
-            const float ddcY = (0.5f - 0.5f * cy / cw) * vpH;
-            return world::Pick(ddcX, ddcY, hit) != 0;
-        }
-
-        // An M2/doodad (a tree, a rock, a banner, another body) standing between the eye and a point.
-        // Only a model hit is taken: terrain and WMO are the trace below, and re-taking them here would
-        // count the ground under the beam a second time.
-        bool ModelBlocked(const float eye[3], const float to[3], float clearance)
-        {
-            if (g_modelPicksLeft <= 0) return false;
-            --g_modelPicksLeft;
-            world::WorldHit hit;
-            if (!PickProjected(eye, to, hit) || hit.type != 2) return false;
-            return HitIsCover(eye, to, hit, clearance);
         }
 
         // True when terrain or WMO stands between the eye and a point, with at least `clearance` yards
@@ -1228,10 +1182,9 @@ namespace wxl::scripts::loot_beam
             gfx::Color cs[kBeamMaxRows + 1][kBeamMaxCols + 1];
 
             // One line-of-sight bisection per column, then every vertex in that column compares its
-            // height to the cut. Terrain and model share the cut: both hide the beam from below, so the
-            // higher of the two wins. The model pick is the costly half, so it is asked only while the
-            // beam is close enough for its silhouette to span real pixels.
-            const bool modelTest = occlude && dist < 250.0f;
+            // height to the cut. Only terrain and WMO are traced here; the exact silhouettes of M2
+            // objects and the player are handled by the beam's occluder mask, which is why this stays a
+            // handful of cheap traces rather than a cursor pick per sample.
             float cut[kBeamMaxCols + 1];
             for (int c = 0; c <= cols; ++c)
             {
@@ -1241,8 +1194,7 @@ namespace wxl::scripts::loot_beam
                     const float w = fmaxf(style.beamWidth * (1.0f - 0.55f * t), minHalfWidth);
                     const float p[3] = { pos[0] + sx * (w * u),
                                          pos[1] + sy * (w * u), baseZ + spanZ * t };
-                    if (LineBlocked(camera, p, 2.0f)) return true;
-                    return modelTest && ModelBlocked(camera, p, 2.0f);
+                    return LineBlocked(camera, p, 2.0f);
                 });
             }
 
@@ -1413,32 +1365,11 @@ namespace wxl::scripts::loot_beam
         // rendered terrain, so the position of the body itself is used.
         const float baseZ = beacon.pos[2];
 
-        // Per-row line-of-sight occlusion: every band of the shaft, and every mote, traces to the eye,
-        // and whatever the eye cannot see is dropped. The beam stays (no despawn) but no part of it
-        // draws through a hill or wall. The engine's own trace is the occluder here because the scene
-        // depth surface this client exposes is not the world's.
+        // Per-column line-of-sight for terrain and WMO: the shaft's columns trace to the eye, and
+        // whatever the eye cannot see is dropped, so no part of the beam draws through a hill or wall.
+        // M2 objects and the player are not traced -- the SDK exposes no cheap ray for model geometry --
+        // but the occluder mask stamped during their draw hides the beam exactly where they cover it.
         const bool occlude = !style_.throughWalls;
-
-        if (occlude && occlDiag_ < 12)
-        {
-            ++occlDiag_;
-            float eye[3];
-            cam::GetPosition(eye);
-            const float bz = beacon.pos[2];
-            const float hz = bz + style_.height;
-            for (int k = 0; k < 3; ++k)
-            {
-                const float z = bz + (hz - bz) * (k / 2.0f);
-                const float to[3] = { beacon.pos[0], beacon.pos[1], z };
-                world::WorldHit hit, mhit;
-                const int ty = world::TraceLine(eye, to, hit);
-                const int my = PickProjected(eye, to, mhit) ? mhit.type : 0;
-                const float dx = to[0] - eye[0], dy = to[1] - eye[1], dz = to[2] - eye[2];
-                const float len = sqrtf(dx * dx + dy * dy + dz * dz);
-                Log(WXL_LOG_INFO, "occl: z=%.1f gap=%.2f type=%d t=%.3f mtype=%d", z,
-                    ty ? (1.0f - hit.t) * len : -1.0f, ty, hit.t, my);
-            }
-        }
 
         if (style_.showBeam && style_.height > 0.01f)
             QueueBeamColumn(beacon.pos, baseZ, style_, alphaScale, rgb, occlude);
@@ -1482,25 +1413,11 @@ namespace wxl::scripts::loot_beam
         // under the next one.
         beacon_gfx::Clear();
         haveWorldMatrices_ = false; // recapture this frame's world matrices at the M2 pass
-        g_modelPicksLeft   = kModelPickBudget;
         beacon_gfx::ResetOccluder();
 
         // Derive the world state live rather than trusting OnWorldEnter alone: a module loaded after
         // the client was already in-world would otherwise never see the enter event and stay dark.
         inWorld_ = world::CurrentMapId() >= 0;
-
-        // The player's model instance, refreshed once a frame: the M2 pass compares every batch's model
-        // against it to collect the character's silhouette (see OnM2Batch). The root of the chain, so a
-        // mount (which parents the rider) is masked as well.
-        void* model = inWorld_ ? world::ResolveObject(world::ActivePlayerGuid(), world::kTypeMaskPlayer) : nullptr;
-        model = model ? unit::Model(model) : nullptr;
-        for (int hop = 0; model && hop < 8; ++hop)
-        {
-            void* parent = unit::ModelParent(model);
-            if (!parent) break;
-            model = parent;
-        }
-        playerModel_ = model;
 
         if (!style_.enabled || !inWorld_)
         {
@@ -1571,21 +1488,15 @@ namespace wxl::scripts::loot_beam
     // matrices are read here and handed to the beacon in the same frame.
     void LootBeam::OnM2Batch(const ev::M2BatchDrawArgs& a)
     {
-        // Collect the active player's exact silhouette while its geometry is on the device. The engine
-        // gives the SDK no model bounds, so the beam's player occlusion is this mask rather than a
-        // stand-in primitive: the character's own batches, re-issued into a screen-sized target at its
-        // real size and shape.
-        if (playerModel_ && !style_.throughWalls)
+        // Collect the exact silhouettes of the M2 geometry the client is drawing (the player, trees,
+        // rocks, banners, other bodies) while it is on the device: the engine gives the SDK no model
+        // bounds, so the beam's occlusion is this mask rather than a stand-in primitive. It is only
+        // worth the extra draws when a beam is actually occluding something -- the !throughWalls case
+        // with a live beacon -- and terrain/WMO are not M2, so those stay on the CPU trace.
+        if (!style_.throughWalls && beaconCount_ > 0)
         {
-            for (void* m = a.model; m; m = unit::ModelParent(m))
-            {
-                if (m == playerModel_)
-                {
-                    beacon_gfx::StampOccluder(gx::Device9(a.device), a.primType, a.baseVertex,
-                                              a.minIndex, a.numVerts, a.startIndex, a.primCount);
-                    break;
-                }
-            }
+            beacon_gfx::StampOccluder(gx::Device9(a.device), a.primType, a.baseVertex,
+                                      a.minIndex, a.numVerts, a.startIndex, a.primCount);
         }
 
         if (haveWorldMatrices_) return; // fires per batch; once a frame is enough

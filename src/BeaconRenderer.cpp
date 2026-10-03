@@ -286,10 +286,11 @@ namespace wxl::scripts::loot_beam::beacon_gfx
 
         // --- player occluder mask ---
         //
-        // The engine exposes no model bounds to the SDK, so the active player's exact silhouette is
-        // collected instead of approximated: its own M2 batches are re-issued into a screen-sized target
-        // (StampOccluder), and the beam's pixel shader drops the fragments that land on it. Same geometry,
-        // same size, real shape -- arms, weapon and all.
+        // The engine exposes no model bounds to the SDK, so the exact silhouettes of the world's M2
+        // geometry -- the active player, trees, rocks, banners, other bodies -- are collected instead of
+        // approximated: their own batches are re-issued into a screen-sized target (StampOccluder), and
+        // the beam's pixel shader drops the fragments that land on it. Same geometry, same size, real
+        // shape. Terrain and WMO have no batches, so those stay on the CPU trace.
         constexpr uint32_t kFmtA8R8G8B8 = 21; // D3DFMT_A8R8G8B8
         gx::RenderTarget g_mask;
         void* g_maskFillPS   = nullptr;
@@ -315,19 +316,6 @@ namespace wxl::scripts::loot_beam::beacon_gfx
             "  return float4(color.rgb, color.a * (1.0 - m));\n"
             "}\n";
 
-        class ScopedDeviceState final
-        {
-        public:
-            explicit ScopedDeviceState(gx::Device9 dev)
-            {
-                auto* d = static_cast<IDirect3DDevice9*>(dev.raw());
-                if (d && SUCCEEDED(d->CreateStateBlock(D3DSBT_ALL, &state_)) && state_)
-                    state_->Capture();
-            }
-            ~ScopedDeviceState() { if (state_) { state_->Apply(); state_->Release(); } }
-        private:
-            IDirect3DStateBlock9* state_ = nullptr;
-        };
     }
 
     bool ProbeResult(float* raw, float* beamZ, float* uv)
@@ -401,31 +389,26 @@ namespace wxl::scripts::loot_beam::beacon_gfx
         if (!g_maskCutoutPS) g_maskCutoutPS = gx::CompilePixelShader(dev, kMaskCutoutHLSL, "ps_2_0");
         if (!g_maskFillPS) return;
 
-        ScopedDeviceState state(dev);
         void* oldRT = nullptr; dev.GetRenderTarget(0, &oldRT);
-        void* oldDS = nullptr; dev.GetDepthStencil(&oldDS);
         void* oldPS = nullptr; dev.GetPixelShader(&oldPS);
-        unsigned char oldVP[24]; dev.GetViewport(oldVP);
         const unsigned sAB = dev.GetRenderState(gx::rs::kAlphaBlend);
         const unsigned sZE = dev.GetRenderState(gx::rs::kZEnable);
         const unsigned sZW = dev.GetRenderState(gx::rs::kZWrite);
-        const unsigned sZF = dev.GetRenderState(gx::rs::kZFunc);
         const unsigned sCW = dev.GetRenderState(gx::rs::kColorWrite);
         const unsigned sSt = dev.GetRenderState(gx::rs::kStencilEnable);
         const unsigned sSc = dev.GetRenderState(gx::rs::kScissorTest);
         const unsigned alphaRef = dev.GetRenderState(24 /*D3DRS_ALPHAREF*/);
         const bool cutout = dev.GetRenderState(gx::rs::kAlphaTest) != 0 && alphaRef >= 8;
-        float proj[16] = {};
-        dev.GetTransform(gx::ts::kProjection, proj);
-        const bool reversed = (-proj[14] * proj[11]) < 0.0f;
 
         dev.SetRenderTarget(0, g_mask.surface);
-        // Depth-test against the scene so terrain and other world geometry keep the mask honest, with
-        // depth writes off so the scene's own buffer is untouched.
-        dev.SetDepthStencil(oldDS);
-        dev.SetRenderState(gx::rs::kZEnable, oldDS ? 1u : 0u);
+        // No depth test. The mask target is non-multisampled, but the scene depth is multisampled at
+        // x2 and single-sampled at x1; a mismatched depth surface silently kills the stamp at one of
+        // them, which is why the mask used to fill at x2 and came out empty at x1. The mask is only a
+        // silhouette of geometry the client already drew and depth-culled, and terrain still occludes
+        // the beam through the CPU trace, so leaving the depth test off is both correct here and
+        // antialiasing-independent.
+        dev.SetRenderState(gx::rs::kZEnable, 0);
         dev.SetRenderState(gx::rs::kZWrite, 0);
-        dev.SetRenderState(gx::rs::kZFunc, reversed ? kGreaterEqual : gx::cmp::kLessEqual);
         dev.SetRenderState(gx::rs::kColorWrite, gx::colorwrite::kAll);
         dev.SetRenderState(gx::rs::kStencilEnable, 0);
         dev.SetRenderState(gx::rs::kScissorTest, 0);
@@ -441,16 +424,13 @@ namespace wxl::scripts::loot_beam::beacon_gfx
 
         dev.SetPixelShader(oldPS);
         dev.SetRenderTarget(0, oldRT);
-        dev.SetDepthStencil(oldDS);
-        dev.SetViewport(oldVP);
         dev.SetRenderState(gx::rs::kAlphaBlend, sAB);
         dev.SetRenderState(gx::rs::kZEnable, sZE);
         dev.SetRenderState(gx::rs::kZWrite, sZW);
-        dev.SetRenderState(gx::rs::kZFunc, sZF);
         dev.SetRenderState(gx::rs::kColorWrite, sCW);
         dev.SetRenderState(gx::rs::kStencilEnable, sSt);
         dev.SetRenderState(gx::rs::kScissorTest, sSc);
-        gx::Release(oldRT); gx::Release(oldDS); gx::Release(oldPS);
+        gx::Release(oldRT); gx::Release(oldPS);
     }
 
     void Clear() { g_vertices.clear(); }
