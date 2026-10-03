@@ -19,4 +19,7 @@ hide entire tiers (say, no beam for currency-only or uncommon corpses) while kee
 Purely visual and entirely client-side: the module sends nothing to the server, and on a stock realm
 nothing is retained once a corpse stops counting. Run the companion **mod-loot-beam** server module and
 the beacon is tinted by the server's own view of the corpse's best loot -- green for a green, purple for
-an epic -- the instant the body dies, before the loot window is ever opened.
+an epic -- the instant the body dies, before the loot window is ever opened. That server half is not
+part of this install: it lives in the repo under `server/mod-loot-beam/` and has to be built into
+AzerothCore (see the README's **Server module** section). Without it, a corpse only colours once its
+loot window has been opened.
