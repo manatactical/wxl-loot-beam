@@ -1027,16 +1027,21 @@ namespace wxl::scripts::loot_beam
             return Pack(alpha, c);
         }
 
-        // The largest beam grid; a beacon close enough to fill the screen uses all of it, and a distant
-        // one uses fewer rows (see the LOD in QueueBeamColumn).
-        constexpr int kBeamMaxRows = 12;
-        constexpr int kBeamMaxCols = 5;
+        // The largest beam grid. The actual grid is chosen per beam from how many pixels it covers on
+        // screen (see QueueBeamColumn); these only cap it.
+        constexpr int kBeamMaxRows = 32;
+        constexpr int kBeamMaxCols = 12;
+
+        // Model geometry is sampled on a small fixed grid, independent of the terrain grid: a tree or a
+        // rock is large on screen, and the screen pick behind it is the costly half of the test.
+        constexpr int kModelRows = 10;
+        constexpr int kModelCols = 5;
 
         // Per-frame cap on the costly screen-space model picks. Terrain traces are cheap and are not
         // capped; this only stops a camp full of corpses from turning the model half of the test into
         // hundreds of cursor searches in one frame. When it runs out the terrain trace still carries the
         // shape, so the beam just loses its finer model silhouette for the rest of that frame.
-        constexpr int kModelPickBudget = 800;
+        constexpr int kModelPickBudget = 1200;
         int g_modelPicksLeft = kModelPickBudget;
 
         // True when the shaft's bounding sphere may cross the view frustum. The planes come from the
@@ -1088,18 +1093,26 @@ namespace wxl::scripts::loot_beam
             return len - hlen > clearance;
         }
 
+        // The live device viewport in pixels, or false when there is no device yet.
+        bool ViewportSize(float& w, float& h)
+        {
+            gx::Device9 dev(gx::RawDevice());
+            if (!dev) return false;
+            struct Viewport { unsigned x, y, width, height; float minZ, maxZ; };
+            Viewport vp = {};
+            if (dev.GetViewport(&vp) < 0 || vp.width == 0 || vp.height == 0) return false;
+            w = float(vp.width); h = float(vp.height);
+            return true;
+        }
+
         // Projects a world point to a device pixel and runs the engine's cursor pick through it. The
         // pick is the only ray in the SDK that tests model geometry; the world intersect behind
         // TraceLine tests terrain and WMO only, so a tree or a rock is invisible to it. False when the
         // device/camera is not ready, the point is behind the eye, or the ray misses everything.
         bool PickProjected(const float eye[3], const float to[3], world::WorldHit& hit)
         {
-            gx::Device9 dev(gx::RawDevice());
-            if (!dev) return false;
-
-            struct Viewport { unsigned x, y, width, height; float minZ, maxZ; };
-            Viewport vp = {};
-            if (dev.GetViewport(&vp) < 0 || vp.width == 0 || vp.height == 0) return false;
+            float vpW = 0.0f, vpH = 0.0f;
+            if (!ViewportSize(vpW, vpH)) return false;
 
             const float* view = cam::GetView();
             const float* proj = cam::GetProjection();
@@ -1112,8 +1125,8 @@ namespace wxl::scripts::loot_beam
 
             const float cx = vx * proj[0] + vy * proj[4] + vz * proj[8] + proj[12];
             const float cy = vx * proj[1] + vy * proj[5] + vz * proj[9] + proj[13];
-            const float ddcX = (0.5f * cx / cw + 0.5f) * float(vp.width);
-            const float ddcY = (0.5f - 0.5f * cy / cw) * float(vp.height);
+            const float ddcX = (0.5f * cx / cw + 0.5f) * vpW;
+            const float ddcY = (0.5f - 0.5f * cy / cw) * vpH;
             return world::Pick(ddcX, ddcY, hit) != 0;
         }
 
@@ -1129,17 +1142,13 @@ namespace wxl::scripts::loot_beam
             return HitIsCover(eye, to, hit, clearance);
         }
 
-        // True when cover stands between the eye and a point, with at least `clearance` yards of it.
-        // A beam stands on the ground, so a trace to it almost always meets that ground right at the
-        // beam itself -- a bare hit is not occlusion. Only a hit well short of the point is.
-        // `models` adds the model-geometry pick; it is off for the sparkles, which are small enough
-        // that the screen pick's per-mote cost is not worth hiding each one behind a tree.
-        bool LineBlocked(const float eye[3], const float to[3], float clearance, bool models)
+        // True when terrain or WMO stands between the eye and a point, with at least `clearance` yards
+        // of it. A beam stands on the ground, so a trace to it almost always meets that ground right at
+        // the beam itself -- a bare hit is not occlusion. Only a hit well short of the point is.
+        bool LineBlocked(const float eye[3], const float to[3], float clearance)
         {
             world::WorldHit hit;
-            if (world::TraceLine(eye, to, hit) && HitIsCover(eye, to, hit, clearance))
-                return true;
-            return models && ModelBlocked(eye, to, clearance);
+            return world::TraceLine(eye, to, hit) && HitIsCover(eye, to, hit, clearance);
         }
 
         // The shaft: one camera-facing billboard, gridded so a colour can sit on every vertex. The
@@ -1168,28 +1177,68 @@ namespace wxl::scripts::loot_beam
             // so a distant corpse still shows a column. 0 leaves the taper alone.
             const float minHalfWidth = style.widthPerYard > 0.0f ? style.widthPerYard * dist : 0.0f;
 
-            int rows = kBeamMaxRows;
-            int cols = kBeamMaxCols;
-            if (dist > 150.0f)      { rows = 5; cols = 4; }
-            else if (dist > 80.0f)  { rows = 8; cols = 5; }
-
             // minBaseZ clips the foot of the shaft up to the cover it stands behind, so the beam is
             // always there but the buried part never draws through the hill or wall in front of it.
             const float baseZ = bodyZ + style.baseOffset;
             const float topZ  = bodyZ + fmaxf(style.height, style.baseOffset + 0.1f);
             if (baseZ >= topZ - 0.05f) return; // cover swallows the whole shaft
+            const float spanZ = topZ - baseZ;
+
+            // The grid follows the shaft's own screen size: a beam that fills the frame is gridded
+            // finely, a distant thread coarsely, so the vertex (and ray) work lands where it can be
+            // seen. 5 px per cell is below what the eye resolves on a soft additive edge.
+            int rows = kBeamMaxRows;
+            int cols = kBeamMaxCols;
+            float vpW = 0.0f, vpH = 0.0f;
+            if (ViewportSize(vpW, vpH) && dist > 0.5f)
+            {
+                const float* proj = cam::GetProjection();
+                const float invDist = 1.0f / dist;
+                const float pxH = fabsf(proj[5]) * spanZ * invDist * 0.5f * vpH;
+                const float pxW = fabsf(proj[0]) * (2.0f * style.beamWidth) * invDist * 0.5f * vpW;
+                rows = int(pxH / 5.0f) + 1;
+                cols = int(pxW / 5.0f) + 1;
+                if (rows < 4)            rows = 4;
+                if (rows > kBeamMaxRows) rows = kBeamMaxRows;
+                if (cols < 2)            cols = 2;
+                if (cols > kBeamMaxCols) cols = kBeamMaxCols;
+            }
+            else if (dist > 150.0f) { rows = 5; cols = 4; }
+            else if (dist > 80.0f)  { rows = 8; cols = 5; }
 
             float      xs[kBeamMaxRows + 1][kBeamMaxCols + 1];
             float      ys[kBeamMaxRows + 1][kBeamMaxCols + 1];
             float      zs[kBeamMaxRows + 1];
             gfx::Color cs[kBeamMaxRows + 1][kBeamMaxCols + 1];
 
+            // Model geometry is sampled on its own small, fixed grid, then bilinearly interpolated to
+            // the terrain grid. A tree or rock is large on screen, and the screen pick behind it is the
+            // costly half of the test, so it does not need the terrain grid's resolution.
+            float mvis[kModelRows + 1][kModelCols + 1];
+            const bool modelTest = occlude && dist < 250.0f;
+            if (modelTest)
+            {
+                for (int mr = 0; mr <= kModelRows; ++mr)
+                {
+                    const float mt = float(mr) / float(kModelRows);
+                    const float mw = fmaxf(style.beamWidth * (1.0f - 0.55f * mt), minHalfWidth);
+                    const float mz = baseZ + spanZ * mt;
+                    for (int mc = 0; mc <= kModelCols; ++mc)
+                    {
+                        const float mu = -1.0f + 2.0f * float(mc) / float(kModelCols);
+                        const float p[3] = { pos[0] + sx * (mw * mu),
+                                             pos[1] + sy * (mw * mu), mz };
+                        mvis[mr][mc] = ModelBlocked(camera, p, 2.0f) ? 0.0f : 1.0f;
+                    }
+                }
+            }
+
             for (int r = 0; r <= rows; ++r)
             {
                 const float t = float(r) / float(rows);
                 const float w = fmaxf(style.beamWidth * (1.0f - 0.55f * t), minHalfWidth);
                 const float v = BeamVertical(t);
-                zs[r] = baseZ + (topZ - baseZ) * t;
+                zs[r] = baseZ + spanZ * t;
 
                 for (int c = 0; c <= cols; ++c)
                 {
@@ -1198,16 +1247,28 @@ namespace wxl::scripts::loot_beam
                     xs[r][c] = pos[0] + sx * (w * u);
                     ys[r][c] = pos[1] + sy * (w * u);
 
-                    // Per-vertex line of sight: a ray to every grid vertex, not one per row, so the cut
-                    // follows the cover's silhouette across the beam's width instead of blanking a whole
-                    // band. Gouraud interpolation then fades across one cell, which reads as a soft edge
-                    // rather than a stair-step. The model pick is the costly half, so it is only asked for
-                    // while the beam is close enough for its silhouette to span real pixels.
+                    // Every vertex takes its own terrain ray, so the cut follows the cover's silhouette
+                    // across the beam's width instead of blanking a whole band; the model half comes
+                    // from the fixed grid above, bilinear in (t,u).
                     float vis = 1.0f;
                     if (occlude)
                     {
                         const float to[3] = { xs[r][c], ys[r][c], zs[r] };
-                        if (LineBlocked(camera, to, 2.0f, dist < 120.0f)) vis = 0.0f;
+                        if (LineBlocked(camera, to, 2.0f)) vis = 0.0f;
+                    }
+                    if (modelTest)
+                    {
+                        const float ft = t * float(kModelRows);
+                        int mr0 = int(ft);
+                        if (mr0 > kModelRows - 1) mr0 = kModelRows - 1;
+                        const float fr = ft - float(mr0);
+                        const float fu = (u + 1.0f) * 0.5f * float(kModelCols);
+                        int mc0 = int(fu);
+                        if (mc0 > kModelCols - 1) mc0 = kModelCols - 1;
+                        const float fc = fu - float(mc0);
+                        const float m0 = mvis[mr0][mc0] * (1.0f - fc) + mvis[mr0][mc0 + 1] * fc;
+                        const float m1 = mvis[mr0 + 1][mc0] * (1.0f - fc) + mvis[mr0 + 1][mc0 + 1] * fc;
+                        vis *= m0 * (1.0f - fr) + m1 * fr;
                     }
                     cs[r][c] = PackTint(style.beamAlpha * v * h * vis * alphaScale, rgb,
                                         0.45f * h * (1.0f - 0.3f * t));
@@ -1271,7 +1332,7 @@ namespace wxl::scripts::loot_beam
                 if (occlude)
                 {
                     const float to[3] = { wx, wy, wz };
-                    if (LineBlocked(camera, to, 2.0f, false)) continue;
+                    if (LineBlocked(camera, to, 2.0f)) continue;
                 }
 
                 // The disc lies in the plane perpendicular to the eye->mote ray, so it reads as a
