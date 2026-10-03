@@ -10,8 +10,15 @@
  * that gap without a custom opcode, an addon message or a client patch: at the moment a creature
  * dies its loot has just been rolled, so the best item quality in that loot is written into the
  * corpse's own UNIT_FIELD_PADDING update field. The field is one this core never writes for
- * non-player objects, it lies inside UNIT_END so the client keeps it, and it is UF_FLAG_PUBLIC so
- * it is sent to every nearby player. The extension reads it straight out of the descriptor block.
+ * non-player objects and it lies inside UNIT_END, so the client keeps it in the descriptor block.
+ * The extension reads it straight out of that block.
+ *
+ * One wrinkle: AzerothCore ships UNIT_FIELD_PADDING as UF_FLAG_NONE, so the core's update builder
+ * (Object::BuildValuesUpdate, which only sends a field when its flag meets the viewer's visibility)
+ * would never put it on the wire and the client would never see the hint. The module promotes the
+ * field to UF_FLAG_PUBLIC in the core's runtime flag table at load (the array is non-const), so the
+ * one unused padding dword rides along on every unit update. That is why no core source edit is
+ * needed: the fix is a write to UnitUpdateFieldFlags[], not a patch.
  *
  * Encoding: the best item quality (0..7) is stored as quality + 1, so the untouched default of 0
  * means "no server hint" and the client falls back to the loot it learns when the window opens.
@@ -29,6 +36,7 @@
 #include "ObjectMgr.h"
 #include "ScriptMgr.h"
 #include "Unit.h"
+#include "UpdateFieldFlags.h"
 
 #include <algorithm>
 
@@ -36,8 +44,9 @@ namespace
 {
     // The slot the client extension reads. UNIT_FIELD_PADDING is the one unit field this core
     // leaves to non-player objects; players use it for the extended-appearance byte, creatures do
-    // not use it at all. It is within UNIT_END (so the client keeps it in the descriptor block) and
-    // UF_FLAG_PUBLIC (so it reaches nearby players). uint16 to match Object::SetUInt32Value.
+    // not use it at all. It is within UNIT_END (so the client keeps it in the descriptor block).
+    // AzerothCore ships it UF_FLAG_NONE, so the world script promotes it to public at load. uint16
+    // to match Object::SetUInt32Value.
     constexpr uint16 kHintField = UNIT_FIELD_PADDING;
 
     // The highest item quality the client's colour table knows (ITEM_QUALITY_HEIRLOOM == 7). A
@@ -102,7 +111,14 @@ public:
     void OnAfterConfigLoad(bool /*reload*/) override
     {
         g_enabled = sConfigMgr->GetOption<bool>("LootBeam.Enable", true);
-        LOG_INFO("module", "mod-loot-beam: server-driven loot beam colour is {}.", g_enabled ? "enabled" : "disabled");
+
+        // Promote the padding field to public so the core actually sends it (see the file header).
+        // Unconditional: it is one unused dword per unit update and the module writes 0 when off.
+        UnitUpdateFieldFlags[UNIT_FIELD_PADDING] = UF_FLAG_PUBLIC;
+
+        LOG_INFO("module",
+                 "mod-loot-beam: server-driven loot beam colour is {} (UNIT_FIELD_PADDING promoted to public).",
+                 g_enabled ? "enabled" : "disabled");
     }
 };
 
