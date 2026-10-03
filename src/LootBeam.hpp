@@ -114,7 +114,7 @@ namespace wxl::scripts::loot_beam
         bool  showBeam       = true;   // raise the beam
         // Draw the beacon through terrain and walls (the default), so a corpse tucked behind a rise is
         // never missed. Turn it off to let the world occlude the marker as real light would.
-        bool  throughWalls   = true;
+        bool  throughWalls   = false;
 
         // How far the beacon is pulled toward the camera along its view ray while the world is allowed
         // to occlude it. At range the client renders terrain at a coarser LOD that sits above the

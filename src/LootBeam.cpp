@@ -498,10 +498,9 @@ namespace wxl::scripts::loot_beam
             // Version 3 marks only still-lootable corpses, so a looted body's beam goes away; older
             // files defaulted to marking every corpse.
             if (version < 3) s.requireLootable = true;
-            // Version 4 made the world hide the beacon again; version 5 reverses that, because a
-            // marker a rise can hide is a marker that gets missed. An older file adopts always-visible,
-            // and a file rewritten at version 5 or later keeps whatever the panel left it at.
-            if (version < 5) s.throughWalls = true;
+            // Version 4 made the world hide the beacon again; version 5 reversed that. The default is
+            // now world-occluded again (ThroughWalls=0), so an older file that never carried the key
+            // adopts occlusion; a file that states the key keeps whatever the panel left it at.
             // Version 7 retunes the shipped look: a taller, narrower beam and a denser, tighter field
             // of smaller, faster sparkles, with the ground pool removed. An older file adopts the new
             // defaults; a file written at version 7 or later keeps whatever the panel left it at.
