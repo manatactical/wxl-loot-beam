@@ -1032,11 +1032,6 @@ namespace wxl::scripts::loot_beam
         constexpr int kBeamMaxRows = 32;
         constexpr int kBeamMaxCols = 12;
 
-        // Model geometry is sampled on a small fixed grid, independent of the terrain grid: a tree or a
-        // rock is large on screen, and the screen pick behind it is the costly half of the test.
-        constexpr int kModelRows = 10;
-        constexpr int kModelCols = 5;
-
         // Per-frame cap on the costly screen-space model picks. Terrain traces are cheap and are not
         // capped; this only stops a camp full of corpses from turning the model half of the test into
         // hundreds of cursor searches in one frame. When it runs out the terrain trace still carries the
@@ -1151,6 +1146,24 @@ namespace wxl::scripts::loot_beam
             return world::TraceLine(eye, to, hit) && HitIsCover(eye, to, hit, clearance);
         }
 
+        // The lowest t in [0,1] the eye can see up a beam column, found by bisection on the shape cover
+        // usually has: hidden low, clear high, like a hill or a trunk. 2 means the whole column is
+        // hidden. A clear column costs a single sample; a blocked one about seven, whatever the row
+        // count -- which is what keeps the ray count at tens per beam instead of hundreds.
+        template <class BlockedFn>
+        float ColumnCut(BlockedFn blocked)
+        {
+            if (!blocked(0.0f)) return 0.0f;
+            if (blocked(1.0f))  return 2.0f;
+            float lo = 0.0f, hi = 1.0f;
+            for (int i = 0; i < 5; ++i)
+            {
+                const float mid = 0.5f * (lo + hi);
+                if (blocked(mid)) lo = mid; else hi = mid;
+            }
+            return hi;
+        }
+
         // The shaft: one camera-facing billboard, gridded so a colour can sit on every vertex. The
         // horizontal falloff keeps the core bright and the edges transparent; the vertical one is
         // transparent at the floating base, peaks just above it, then eases to nothing at the top.
@@ -1211,26 +1224,23 @@ namespace wxl::scripts::loot_beam
             float      zs[kBeamMaxRows + 1];
             gfx::Color cs[kBeamMaxRows + 1][kBeamMaxCols + 1];
 
-            // Model geometry is sampled on its own small, fixed grid, then bilinearly interpolated to
-            // the terrain grid. A tree or rock is large on screen, and the screen pick behind it is the
-            // costly half of the test, so it does not need the terrain grid's resolution.
-            float mvis[kModelRows + 1][kModelCols + 1];
+            // One line-of-sight bisection per column, then every vertex in that column compares its
+            // height to the cut. Terrain and model share the cut: both hide the beam from below, so the
+            // higher of the two wins. The model pick is the costly half, so it is asked only while the
+            // beam is close enough for its silhouette to span real pixels.
             const bool modelTest = occlude && dist < 250.0f;
-            if (modelTest)
+            float cut[kBeamMaxCols + 1];
+            for (int c = 0; c <= cols; ++c)
             {
-                for (int mr = 0; mr <= kModelRows; ++mr)
-                {
-                    const float mt = float(mr) / float(kModelRows);
-                    const float mw = fmaxf(style.beamWidth * (1.0f - 0.55f * mt), minHalfWidth);
-                    const float mz = baseZ + spanZ * mt;
-                    for (int mc = 0; mc <= kModelCols; ++mc)
-                    {
-                        const float mu = -1.0f + 2.0f * float(mc) / float(kModelCols);
-                        const float p[3] = { pos[0] + sx * (mw * mu),
-                                             pos[1] + sy * (mw * mu), mz };
-                        mvis[mr][mc] = ModelBlocked(camera, p, 2.0f) ? 0.0f : 1.0f;
-                    }
-                }
+                if (!occlude) { cut[c] = 0.0f; continue; }
+                const float u = -1.0f + 2.0f * float(c) / float(cols);
+                cut[c] = ColumnCut([&](float t) {
+                    const float w = fmaxf(style.beamWidth * (1.0f - 0.55f * t), minHalfWidth);
+                    const float p[3] = { pos[0] + sx * (w * u),
+                                         pos[1] + sy * (w * u), baseZ + spanZ * t };
+                    if (LineBlocked(camera, p, 2.0f)) return true;
+                    return modelTest && ModelBlocked(camera, p, 2.0f);
+                });
             }
 
             for (int r = 0; r <= rows; ++r)
@@ -1247,29 +1257,8 @@ namespace wxl::scripts::loot_beam
                     xs[r][c] = pos[0] + sx * (w * u);
                     ys[r][c] = pos[1] + sy * (w * u);
 
-                    // Every vertex takes its own terrain ray, so the cut follows the cover's silhouette
-                    // across the beam's width instead of blanking a whole band; the model half comes
-                    // from the fixed grid above, bilinear in (t,u).
-                    float vis = 1.0f;
-                    if (occlude)
-                    {
-                        const float to[3] = { xs[r][c], ys[r][c], zs[r] };
-                        if (LineBlocked(camera, to, 2.0f)) vis = 0.0f;
-                    }
-                    if (modelTest)
-                    {
-                        const float ft = t * float(kModelRows);
-                        int mr0 = int(ft);
-                        if (mr0 > kModelRows - 1) mr0 = kModelRows - 1;
-                        const float fr = ft - float(mr0);
-                        const float fu = (u + 1.0f) * 0.5f * float(kModelCols);
-                        int mc0 = int(fu);
-                        if (mc0 > kModelCols - 1) mc0 = kModelCols - 1;
-                        const float fc = fu - float(mc0);
-                        const float m0 = mvis[mr0][mc0] * (1.0f - fc) + mvis[mr0][mc0 + 1] * fc;
-                        const float m1 = mvis[mr0 + 1][mc0] * (1.0f - fc) + mvis[mr0 + 1][mc0 + 1] * fc;
-                        vis *= m0 * (1.0f - fr) + m1 * fr;
-                    }
+                    // 0 below the column's cut, 1 above it; Gouraud then fades across one cell.
+                    const float vis = t >= cut[c] ? 1.0f : 0.0f;
                     cs[r][c] = PackTint(style.beamAlpha * v * h * vis * alphaScale, rgb,
                                         0.45f * h * (1.0f - 0.3f * t));
                 }
