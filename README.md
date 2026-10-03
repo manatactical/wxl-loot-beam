@@ -26,11 +26,11 @@ walls** off to let the world occlude it like any other geometry.
 
 ## Loot rarity colour
 
-The beacon is tinted with the rarest item quality in the corpse's loot, using the game's own quality
-colours (poor grey, common white, uncommon green, rare blue, epic purple, legendary orange, artifact
-gold). A corpse holding several items takes the colour of the highest quality among them, so a body
-with one epic and a pile of greys reads purple. A body whose loot is not known keeps the configured
-`Color`.
+The beacon is tinted with the rarest item quality in the corpse's loot, using a per-tier palette
+(currency, poor and common black, uncommon green, rare `#0032FF`, epic `#9600FF`, legendary orange, artifact
+gold; each retunable in the INI or the panel). A corpse holding several items takes the colour of the
+highest quality among them, so a body with one epic and a pile of greys reads purple. A body whose
+loot is not known keeps the configured `Color`.
 
 The 3.3.5a client only receives a corpse's loot when loot is requested for it -- normally the loot
 window opening -- so on a stock server the quality colour appears once you have opened that body. The
@@ -68,8 +68,9 @@ the panel's **Gear tiers** section (and the `Tier.*` keys in the INI):
 | `Poor` .. `Heirloom` | the rarest item quality in the loot: 0 grey, 1 white, 2 green, 3 blue, 4 purple, 5 orange, 6 artifact, 7 heirloom |
 
 A tier switched off produces **no beacon at all** for corpses whose rarest loot falls into it, so you
-can hide e.g. currency-only or uncommon bodies and keep the rest. The defaults are the game's own
-quality colours; a body whose loot (and so tier) is not known still uses `Color`.
+can hide e.g. currency-only or uncommon bodies and keep the rest. Each tier's default colour is set
+in the INI and the panel (currency, poor and common ship pure black, rare `#0032FF`, epic `#9600FF`); a body
+whose loot (and so tier) is not known still uses `Color`.
 
 ## Server module
 

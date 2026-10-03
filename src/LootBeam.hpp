@@ -89,22 +89,22 @@ namespace wxl::scripts::loot_beam
         float color[3]       = { 1.00f, 0.82f, 0.42f }; // warm gold; the fallback while a body's
                                                        // loot (and so its tier) is not yet known
 
-        // Per-tier tint and on/off. Indexed by GearTier; the defaults below are the game's own item
-        // quality colours, with the money-only "currency" tier given a bright gold of its own. A tier
+        // Per-tier tint and on/off. Indexed by GearTier. The shipped palette runs from pure black
+        // (currency, poor, common) through the quality colours to the new rare/epic tints. A tier
         // switched off produces no beacon for corpses that fall into it.
         TierStyle tiers[kTierCount] = {
-            { true, { 1.00f, 0.82f, 0.00f } }, // kTierCurrency
-            { true, { 0.62f, 0.62f, 0.62f } }, // kTierPoor
-            { true, { 1.00f, 1.00f, 1.00f } }, // kTierCommon
+            { true, { 0.00f, 0.00f, 0.00f } }, // kTierCurrency pure black
+            { true, { 0.00f, 0.00f, 0.00f } }, // kTierPoor     pure black
+            { true, { 0.00f, 0.00f, 0.00f } }, // kTierCommon   pure black
             { true, { 0.12f, 1.00f, 0.00f } }, // kTierUncommon
-            { true, { 0.00f, 0.44f, 0.87f } }, // kTierRare
-            { true, { 0.64f, 0.21f, 0.93f } }, // kTierEpic
+            { true, { 0.00f, 0.19607843f, 1.00f } }, // kTierRare     #0032FF (0,50,255)
+            { true, { 0.58823529f, 0.00f, 1.00f } }, // kTierEpic     #9600FF (150,0,255)
             { true, { 1.00f, 0.50f, 0.00f } }, // kTierLegendary
             { true, { 0.90f, 0.80f, 0.50f } }, // kTierArtifact
             { true, { 0.00f, 0.80f, 1.00f } }, // kTierHeirloom
         };
 
-        float beamAlpha      = 0.60f;  // opacity of the beam at its base
+        float beamAlpha      = 0.75f;  // opacity of the beam at its base
         float pulse          = 0.20f;  // slow breathing depth, 0 = steady
         float pulseSpeed     = 1.60f;  // breathing rate
         float fadeIn         = 0.35f;  // seconds for a new beacon to reach full opacity (0 = instant)

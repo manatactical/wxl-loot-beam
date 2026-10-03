@@ -51,7 +51,7 @@ namespace wxl::scripts::loot_beam
         constexpr float       kUnitToByte = 255.0f;
         // Bumped when a shipped default changes in a way an existing file must adopt. A file older
         // than this has its stale keys replaced with the current shipped defaults.
-        constexpr int         kConfigVersion = 7;
+        constexpr int         kConfigVersion = 8;
 
         // INI key stem and panel label per GearTier, in the order the panel lists them. The stem names
         // the keys Tier.<Stem>.Enabled and Tier.<Stem>.Color.
@@ -509,6 +509,29 @@ namespace wxl::scripts::loot_beam
                 s.sparkleDrift   = 0.05f;
                 s.sparkleLife    = 2.40f;
                 s.sparkleTwinkle = 6.00f;
+            }
+            // Version 8 retunes the shipped palette and brightness: currency, poor and common go
+            // pure black, rare/epic take their new custom tints, and the beam starts at 0.75 opacity.
+            // An older file adopts the new defaults; a file written at version 8 or later keeps
+            // whatever the panel left it at.
+            if (version < 8)
+            {
+                s.tiers[kTierCurrency].color[0] = 0.00f;
+                s.tiers[kTierCurrency].color[1] = 0.00f;
+                s.tiers[kTierCurrency].color[2] = 0.00f;
+                s.tiers[kTierPoor].color[0]   = 0.00f;
+                s.tiers[kTierPoor].color[1]   = 0.00f;
+                s.tiers[kTierPoor].color[2]   = 0.00f;
+                s.tiers[kTierCommon].color[0] = 0.00f;
+                s.tiers[kTierCommon].color[1] = 0.00f;
+                s.tiers[kTierCommon].color[2] = 0.00f;
+                s.tiers[kTierRare].color[0]   = 0.00f;
+                s.tiers[kTierRare].color[1]   = 0.19607843f;
+                s.tiers[kTierRare].color[2]   = 1.00f;
+                s.tiers[kTierEpic].color[0]   = 0.58823529f;
+                s.tiers[kTierEpic].color[1]   = 0.00f;
+                s.tiers[kTierEpic].color[2]   = 1.00f;
+                s.beamAlpha = 0.75f;
             }
         }
 
