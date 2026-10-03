@@ -23,6 +23,7 @@
 #include "game/Gfx.hpp"
 #include "game/Pick.hpp"
 #include "game/Script.hpp"
+#include "game/Unit.hpp"
 #include "game/World.hpp"
 
 #include <windows.h>
@@ -39,6 +40,7 @@ namespace wxl::scripts::loot_beam
     namespace gfx   = wxl::game::gfx;
     namespace gx    = wxl::game::gx;
     namespace world = wxl::game::world;
+    namespace unit  = wxl::game::unit;
     namespace cam   = wxl::game::camera;
     namespace script = wxl::game::script;
 
@@ -1138,89 +1140,6 @@ namespace wxl::scripts::loot_beam
             return HitIsCover(eye, to, hit, clearance);
         }
 
-        // The active player's own character as a rounded column: feet from the unit position, head from
-        // the name anchor above it, a body-width radius. The engine's cursor pick does not return the
-        // local player, so without this a beam behind the player's back draws straight through the body.
-        // A capsule rather than a box, so the cut reads as a character -- narrow, with the beam clearing
-        // above the head and beside the shoulders -- instead of blanking a fat square. Rebuilt once a
-        // frame, so the test itself is a ray/cylinder plus a head sphere.
-        struct PlayerCapsule { float x; float y; float z0; float z1; float r; bool valid; };
-        PlayerCapsule g_playerCap = {};
-
-        void UpdatePlayerCapsule()
-        {
-            g_playerCap.valid = false;
-            void* player = world::ResolveObject(world::ActivePlayerGuid(), world::kTypeMaskPlayer);
-            if (!player) return;
-            float feet[3], head[3];
-            world::Position(player, feet);
-            world::NamePosition(player, head);
-            g_playerCap.x  = feet[0];
-            g_playerCap.y  = feet[1];
-            g_playerCap.z0 = feet[2] - 0.1f;
-            g_playerCap.z1 = fmaxf(head[2], feet[2] + 1.6f); // anchor stunted? keep a body's height
-            g_playerCap.r  = 0.45f;
-            g_playerCap.valid = true;
-        }
-
-        // True when the eye->point segment passes through the player's body with `clearance` yards to
-        // spare before the point, so the beam is behind the character rather than beside it.
-        bool PlayerBlocked(const float eye[3], const float to[3], float clearance)
-        {
-            if (!g_playerCap.valid) return false;
-            const float dx = to[0] - eye[0], dy = to[1] - eye[1], dz = to[2] - eye[2];
-            const float len2 = dx * dx + dy * dy + dz * dz;
-            const float len = sqrtf(len2);
-            if (len < 1.0e-4f) return false;
-            // A piece is cover when its far side is more than `clearance` short of the point.
-            auto cover = [&](float texit) { return texit > 0.0f && (1.0f - fminf(texit, 1.0f)) * len > clearance; };
-
-            // Body: the vertical cylinder, clipped to [z0, z1].
-            float t0 = 0.0f, t1 = 1.0f;
-            const float ox = eye[0] - g_playerCap.x, oy = eye[1] - g_playerCap.y;
-            const float a = dx * dx + dy * dy;
-            if (a < 1.0e-9f)
-            {
-                if (ox * ox + oy * oy > g_playerCap.r * g_playerCap.r) return false;
-            }
-            else
-            {
-                const float b = 2.0f * (ox * dx + oy * dy);
-                const float c = ox * ox + oy * oy - g_playerCap.r * g_playerCap.r;
-                const float disc = b * b - 4.0f * a * c;
-                if (disc < 0.0f) return false;
-                const float sq = sqrtf(disc);
-                t0 = (-b - sq) / (2.0f * a);
-                t1 = (-b + sq) / (2.0f * a);
-            }
-            if (fabsf(dz) > 1.0e-9f)
-            {
-                float za = (g_playerCap.z0 - eye[2]) / dz;
-                float zb = (g_playerCap.z1 - eye[2]) / dz;
-                if (za > zb) { const float s = za; za = zb; zb = s; }
-                if (za > t0) t0 = za;
-                if (zb < t1) t1 = zb;
-            }
-            else if (eye[2] < g_playerCap.z0 - g_playerCap.r || eye[2] > g_playerCap.z1 + g_playerCap.r)
-            {
-                return false;
-            }
-            if (t0 <= t1 && cover(t1)) return true;
-
-            // Head: a sphere at the top, so the silhouette rounds off above the shoulders.
-            const float hx = eye[0] - g_playerCap.x, hy = eye[1] - g_playerCap.y;
-            const float hz = eye[2] - g_playerCap.z1;
-            const float b = 2.0f * (hx * dx + hy * dy + hz * dz);
-            const float c = hx * hx + hy * hy + hz * hz - g_playerCap.r * g_playerCap.r;
-            const float disc = b * b - 4.0f * len2 * c;
-            if (disc >= 0.0f)
-            {
-                const float t = (-b + sqrtf(disc)) / (2.0f * len2);
-                if (cover(t)) return true;
-            }
-            return false;
-        }
-
         // True when terrain or WMO stands between the eye and a point, with at least `clearance` yards
         // of it. A beam stands on the ground, so a trace to it almost always meets that ground right at
         // the beam itself -- a bare hit is not occlusion. Only a hit well short of the point is.
@@ -1323,7 +1242,6 @@ namespace wxl::scripts::loot_beam
                     const float p[3] = { pos[0] + sx * (w * u),
                                          pos[1] + sy * (w * u), baseZ + spanZ * t };
                     if (LineBlocked(camera, p, 2.0f)) return true;
-                    if (PlayerBlocked(camera, p, 2.0f)) return true;
                     return modelTest && ModelBlocked(camera, p, 2.0f);
                 });
             }
@@ -1565,11 +1483,24 @@ namespace wxl::scripts::loot_beam
         beacon_gfx::Clear();
         haveWorldMatrices_ = false; // recapture this frame's world matrices at the M2 pass
         g_modelPicksLeft   = kModelPickBudget;
-        UpdatePlayerCapsule();
+        beacon_gfx::ResetOccluder();
 
         // Derive the world state live rather than trusting OnWorldEnter alone: a module loaded after
         // the client was already in-world would otherwise never see the enter event and stay dark.
         inWorld_ = world::CurrentMapId() >= 0;
+
+        // The player's model instance, refreshed once a frame: the M2 pass compares every batch's model
+        // against it to collect the character's silhouette (see OnM2Batch). The root of the chain, so a
+        // mount (which parents the rider) is masked as well.
+        void* model = inWorld_ ? world::ResolveObject(world::ActivePlayerGuid(), world::kTypeMaskPlayer) : nullptr;
+        model = model ? unit::Model(model) : nullptr;
+        for (int hop = 0; model && hop < 8; ++hop)
+        {
+            void* parent = unit::ModelParent(model);
+            if (!parent) break;
+            model = parent;
+        }
+        playerModel_ = model;
 
         if (!style_.enabled || !inWorld_)
         {
@@ -1640,6 +1571,23 @@ namespace wxl::scripts::loot_beam
     // matrices are read here and handed to the beacon in the same frame.
     void LootBeam::OnM2Batch(const ev::M2BatchDrawArgs& a)
     {
+        // Collect the active player's exact silhouette while its geometry is on the device. The engine
+        // gives the SDK no model bounds, so the beam's player occlusion is this mask rather than a
+        // stand-in primitive: the character's own batches, re-issued into a screen-sized target at its
+        // real size and shape.
+        if (playerModel_ && !style_.throughWalls)
+        {
+            for (void* m = a.model; m; m = unit::ModelParent(m))
+            {
+                if (m == playerModel_)
+                {
+                    beacon_gfx::StampOccluder(gx::Device9(a.device), a.primType, a.baseVertex,
+                                              a.minIndex, a.numVerts, a.startIndex, a.primCount);
+                    break;
+                }
+            }
+        }
+
         if (haveWorldMatrices_) return; // fires per batch; once a frame is enough
         gx::Device9 dev(a.device);
         dev.GetTransform(gx::ts::kView, worldView_);

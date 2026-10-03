@@ -58,6 +58,25 @@ namespace wxl::scripts::loot_beam::beacon_gfx
     void OnDeviceLost();
 
     /**
+     * @brief Starts a new frame's occluder mask: the previous frame's silhouette is dropped and the
+     *        target stays untouched until the player's first batch stamps into it. Called once a frame.
+     */
+    void ResetOccluder();
+
+    /**
+     * @brief Stamps one batch of the active player's model into the occluder mask.
+     *
+     * The engine gives the SDK no model bounds, so the character's exact silhouette is collected by
+     * re-issuing its own M2 batches into a screen-sized target: the same geometry at the same size, not
+     * a stand-in box. The batch's vertex stream, shader and world transform are already bound when this
+     * is called from the M2 draw, so only the render target and a solid-fill pixel shader are swapped in.
+     * @param dev  the live device.
+     * @param primType,baseVertex,minIndex,numVerts,startIndex,primCount  the native draw parameters.
+     */
+    void StampOccluder(wxl::game::gx::Device9 dev, int primType, int baseVertex, unsigned minIndex,
+                       unsigned numVerts, unsigned startIndex, unsigned primCount);
+
+    /**
      * @brief Reads the one-shot depth probe taken on the first occluded draw.
      * @param raw    receives the raw scene depth sampled at the beam's screen point.
      * @param beamZ  receives the beam's own view depth (the value the shader compares against).

@@ -283,6 +283,51 @@ namespace wxl::scripts::loot_beam::beacon_gfx
             gx::Release(system); gx::Release(targetSurface); gx::Release(target);
             return value;
         }
+
+        // --- player occluder mask ---
+        //
+        // The engine exposes no model bounds to the SDK, so the active player's exact silhouette is
+        // collected instead of approximated: its own M2 batches are re-issued into a screen-sized target
+        // (StampOccluder), and the beam's pixel shader drops the fragments that land on it. Same geometry,
+        // same size, real shape -- arms, weapon and all.
+        constexpr uint32_t kFmtA8R8G8B8 = 21; // D3DFMT_A8R8G8B8
+        gx::RenderTarget g_mask;
+        void* g_maskFillPS   = nullptr;
+        void* g_maskCutoutPS = nullptr;
+        void* g_maskSamplePS = nullptr;
+        bool  g_maskCleared    = false;
+        bool  g_maskHasContent = false;
+
+        // Fills the mask with opaque white; the texture alpha is ignored here because a model's diffuse
+        // alpha carries material data that would speckle the silhouette.
+        constexpr const char* kMaskFillHLSL =
+            "float4 main(float2 uv : TEXCOORD0) : COLOR0 { return float4(1,1,1,1); }\n";
+        // Alpha-tested batches (hair, capes, wings) follow their real cutout instead of a solid card.
+        constexpr const char* kMaskCutoutHLSL =
+            "sampler2D s0 : register(s0);\n"
+            "float4 main(float2 uv : TEXCOORD0) : COLOR0 { clip(tex2D(s0, uv).a - 0.5); return float4(1,1,1,1); }\n";
+        // Beam side: keep the light's colour, scale its alpha to nothing wherever the mask is set.
+        constexpr const char* kMaskSampleHLSL =
+            "sampler2D s0 : register(s0);\n"
+            "float4 scale : register(c0);\n"
+            "float4 main(float4 color : COLOR0, float4 vpos : VPOS) : COLOR0 {\n"
+            "  float m = tex2D(s0, vpos.xy * scale.xy).a;\n"
+            "  return float4(color.rgb, color.a * (1.0 - m));\n"
+            "}\n";
+
+        class ScopedDeviceState final
+        {
+        public:
+            explicit ScopedDeviceState(gx::Device9 dev)
+            {
+                auto* d = static_cast<IDirect3DDevice9*>(dev.raw());
+                if (d && SUCCEEDED(d->CreateStateBlock(D3DSBT_ALL, &state_)) && state_)
+                    state_->Capture();
+            }
+            ~ScopedDeviceState() { if (state_) { state_->Apply(); state_->Release(); } }
+        private:
+            IDirect3DStateBlock9* state_ = nullptr;
+        };
     }
 
     bool ProbeResult(float* raw, float* beamZ, float* uv)
@@ -329,6 +374,83 @@ namespace wxl::scripts::loot_beam::beacon_gfx
         gx::Release(g_depthPS);
         g_depthVS = nullptr;
         g_depthPS = nullptr;
+        gx::Release(g_mask);
+        gx::Release(g_maskFillPS);
+        gx::Release(g_maskCutoutPS);
+        gx::Release(g_maskSamplePS);
+        g_maskFillPS = g_maskCutoutPS = g_maskSamplePS = nullptr;
+    }
+
+    void ResetOccluder()
+    {
+        // The mask is only trusted for the frame that stamped it: a frame the player did not draw
+        // leaves nothing to sample, so the previous silhouette must not linger.
+        g_maskCleared    = false;
+        g_maskHasContent = false;
+    }
+
+    void StampOccluder(gx::Device9 dev, int primType, int baseVertex, unsigned minIndex,
+                       unsigned numVerts, unsigned startIndex, unsigned primCount)
+    {
+        if (!dev) return;
+        if (!g_mask.surface && !gx::EnsureBackbufferTarget(dev, g_mask, kFmtA8R8G8B8)) return;
+        // Mesh only: attached particles, glows and billboards ride the same model context with alpha
+        // blending on, and letting them in would mask the beam over their broad cards.
+        if (dev.GetRenderState(gx::rs::kAlphaBlend) != 0) return;
+        if (!g_maskFillPS)   g_maskFillPS   = gx::CompilePixelShader(dev, kMaskFillHLSL,   "ps_2_0");
+        if (!g_maskCutoutPS) g_maskCutoutPS = gx::CompilePixelShader(dev, kMaskCutoutHLSL, "ps_2_0");
+        if (!g_maskFillPS) return;
+
+        ScopedDeviceState state(dev);
+        void* oldRT = nullptr; dev.GetRenderTarget(0, &oldRT);
+        void* oldDS = nullptr; dev.GetDepthStencil(&oldDS);
+        void* oldPS = nullptr; dev.GetPixelShader(&oldPS);
+        unsigned char oldVP[24]; dev.GetViewport(oldVP);
+        const unsigned sAB = dev.GetRenderState(gx::rs::kAlphaBlend);
+        const unsigned sZE = dev.GetRenderState(gx::rs::kZEnable);
+        const unsigned sZW = dev.GetRenderState(gx::rs::kZWrite);
+        const unsigned sZF = dev.GetRenderState(gx::rs::kZFunc);
+        const unsigned sCW = dev.GetRenderState(gx::rs::kColorWrite);
+        const unsigned sSt = dev.GetRenderState(gx::rs::kStencilEnable);
+        const unsigned sSc = dev.GetRenderState(gx::rs::kScissorTest);
+        const unsigned alphaRef = dev.GetRenderState(24 /*D3DRS_ALPHAREF*/);
+        const bool cutout = dev.GetRenderState(gx::rs::kAlphaTest) != 0 && alphaRef >= 8;
+        float proj[16] = {};
+        dev.GetTransform(gx::ts::kProjection, proj);
+        const bool reversed = (-proj[14] * proj[11]) < 0.0f;
+
+        dev.SetRenderTarget(0, g_mask.surface);
+        // Depth-test against the scene so terrain and other world geometry keep the mask honest, with
+        // depth writes off so the scene's own buffer is untouched.
+        dev.SetDepthStencil(oldDS);
+        dev.SetRenderState(gx::rs::kZEnable, oldDS ? 1u : 0u);
+        dev.SetRenderState(gx::rs::kZWrite, 0);
+        dev.SetRenderState(gx::rs::kZFunc, reversed ? kGreaterEqual : gx::cmp::kLessEqual);
+        dev.SetRenderState(gx::rs::kColorWrite, gx::colorwrite::kAll);
+        dev.SetRenderState(gx::rs::kStencilEnable, 0);
+        dev.SetRenderState(gx::rs::kScissorTest, 0);
+        if (!g_maskCleared)
+        {
+            dev.Clear(0, nullptr, gx::clear::kColor, 0x00000000, 1.0f, 0);
+            g_maskCleared = true;
+        }
+        dev.SetRenderState(gx::rs::kAlphaBlend, 0);
+        dev.SetPixelShader(cutout ? g_maskCutoutPS : g_maskFillPS);
+        dev.DrawIndexedPrimitive(primType, baseVertex, minIndex, numVerts, startIndex, primCount);
+        g_maskHasContent = true;
+
+        dev.SetPixelShader(oldPS);
+        dev.SetRenderTarget(0, oldRT);
+        dev.SetDepthStencil(oldDS);
+        dev.SetViewport(oldVP);
+        dev.SetRenderState(gx::rs::kAlphaBlend, sAB);
+        dev.SetRenderState(gx::rs::kZEnable, sZE);
+        dev.SetRenderState(gx::rs::kZWrite, sZW);
+        dev.SetRenderState(gx::rs::kZFunc, sZF);
+        dev.SetRenderState(gx::rs::kColorWrite, sCW);
+        dev.SetRenderState(gx::rs::kStencilEnable, sSt);
+        dev.SetRenderState(gx::rs::kScissorTest, sSc);
+        gx::Release(oldRT); gx::Release(oldDS); gx::Release(oldPS);
     }
 
     void Clear() { g_vertices.clear(); }
@@ -491,6 +613,25 @@ namespace wxl::scripts::loot_beam::beacon_gfx
         if (g_depth == gfx::Depth::Through)
         {
             dev.SetRenderState(gx::rs::kZEnable, 0);
+            // The player's exact silhouette, sampled per fragment: where it covers the screen the
+            // beam's alpha is scaled to nothing, so the shaft disappears behind the character's real
+            // shape instead of a stand-in box.
+            if (g_maskHasContent && g_mask.texture)
+            {
+                if (!g_maskSamplePS) g_maskSamplePS = gx::CompilePixelShader(dev, kMaskSampleHLSL, "ps_3_0");
+                if (g_maskSamplePS)
+                {
+                    const float scale[4] = { 1.0f / float(g_mask.width), 1.0f / float(g_mask.height), 0.0f, 0.0f };
+                    dev.SetTexture(0, g_mask.texture);
+                    dev.SetSamplerState(0, gx::samp::kAddressU,  gx::address::kClamp);
+                    dev.SetSamplerState(0, gx::samp::kAddressV,  gx::address::kClamp);
+                    dev.SetSamplerState(0, gx::samp::kMagFilter, gx::filter::kPoint);
+                    dev.SetSamplerState(0, gx::samp::kMinFilter, gx::filter::kPoint);
+                    dev.SetSamplerState(0, gx::samp::kMipFilter, gx::filter::kNone);
+                    dev.SetPixelShader(g_maskSamplePS);
+                    dev.SetPixelShaderConstantF(0, scale, 1);
+                }
+            }
         }
         else
         {
