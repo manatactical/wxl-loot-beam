@@ -116,6 +116,15 @@ namespace wxl::scripts::loot_beam
         // never missed. Turn it off to let the world occlude the marker as real light would.
         bool  throughWalls   = true;
 
+        // How far the beacon is pulled toward the camera along its view ray while the world is allowed
+        // to occlude it. At range the client renders terrain at a coarser LOD that sits above the
+        // collision height the beacon is placed on, so a plain depth test hides the beacon beyond a
+        // few yards; the pull changes depth only, never screen position, so it clears that LOD without
+        // letting the beacon through anything really in front of it. depthPushPerYard adds to it per
+        // yard of camera distance, for the error that grows with range.
+        float depthPush        = 1.50f;
+        float depthPushPerYard = 0.02f;
+
         // true (the default) marks only corpses the server still flags lootable, so an already-looted
         // body goes dark; false marks every dead NPC.
         bool  requireLootable = true;
@@ -177,9 +186,11 @@ namespace wxl::scripts::loot_beam
 
         // --- event handlers ---
         void OnUpdate(const events::UpdateArgs& a);
+        void OnM2Batch(const events::M2BatchDrawArgs& a);
         void OnWorldSceneEnd(const events::WorldSceneEndArgs& a);
         void OnWorldEnter(const events::WorldEnterArgs& a);
         void OnWorldLeave(const events::WorldLeaveArgs& a);
+        void OnDeviceLost(const events::DeviceResetArgs& a);
 
         // --- steps ---
         int  ScanUnits();                       // mark tracked beacons seen this frame; returns units seen
@@ -188,6 +199,13 @@ namespace wxl::scripts::loot_beam
         void UpdateFade(float dt);              // advance each beacon's fade; drop the dead ones
         void DumpUnit(void* unit, unsigned long long guid); // one-shot descriptor window for debugging
         void QueueBeacon(const Beacon& beacon, float alphaScale, const float rgb[3]); // beam + motes
+
+        // The live device view/projection captured at a world draw, used in place of gfx::SceneMatrices
+        // so the beam is placed and depth-tested with the same matrices the world was.
+        float          worldView_[16] = {};
+        float          worldProj_[16] = {};
+        bool           haveWorldMatrices_ = false;
+
         void SeedSparkles(Beacon& b);  // fill a new beacon's mote field from its GUID
         void AdvanceSparkles(Beacon& b, float dt); // drift and respawn a beacon's motes
         void LoadConfigNow();
@@ -224,6 +242,9 @@ namespace wxl::scripts::loot_beam
         bool           loggedFirstScan_  = false;
         bool           loggedFirstFlush_ = false;
         bool           loggedClipDiag_   = false;
+        bool           loggedSetup_      = false;
+        bool           loggedMatrices_   = false;
+        mutable int    occlDiag_         = 0;
         bool           loggedServerHint_ = false;
         int            emptyFrameStreak_ = 0;
         int            emptyWarnings_    = 0;

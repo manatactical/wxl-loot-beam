@@ -123,6 +123,7 @@ with the defaults on first load.
 | `MaxDistance` | ignore corpses beyond this range (0 = unlimited) |
 | `ShowBeam` | draw the beam (the sparkles can still be shown without it) |
 | `ThroughWalls` | draw through terrain and walls (on by default, so a rise cannot hide the beacon) |
+| `DepthPush`, `DepthPushPerYard` | yards the beacon is pulled toward the camera while occluded, plus extra per yard of distance, so the coarser terrain LOD at range cannot hide it |
 | `WidthPerYard` | minimum beam half-width per yard of camera distance |
 | `RequireLootable` | only beam corpses the server still flags lootable (default on) |
 | `LootColor` | tint a known corpse by the rarest item quality in its loot (default on) instead of `Color` |

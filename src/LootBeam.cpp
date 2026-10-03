@@ -51,7 +51,7 @@ namespace wxl::scripts::loot_beam
         constexpr float       kUnitToByte = 255.0f;
         // Bumped when a shipped default changes in a way an existing file must adopt. A file older
         // than this has its stale keys replaced with the current shipped defaults.
-        constexpr int         kConfigVersion = 8;
+        constexpr int         kConfigVersion = 9;
 
         // INI key stem and panel label per GearTier, in the order the panel lists them. The stem names
         // the keys Tier.<Stem>.Enabled and Tier.<Stem>.Color.
@@ -376,6 +376,7 @@ namespace wxl::scripts::loot_beam
                   a.fadeIn == b.fadeIn && a.fadeOut == b.fadeOut &&
                   a.maxDistance == b.maxDistance &&
                   a.showBeam == b.showBeam && a.throughWalls == b.throughWalls &&
+                  a.depthPush == b.depthPush && a.depthPushPerYard == b.depthPushPerYard &&
                   a.requireLootable == b.requireLootable && a.lootColor == b.lootColor &&
                   a.serverColor == b.serverColor && a.showSparkles == b.showSparkles &&
                   a.sparkleCount == b.sparkleCount && a.sparkleSize == b.sparkleSize &&
@@ -399,9 +400,11 @@ namespace wxl::scripts::loot_beam
     LootBeam::LootBeam()
     {
         on<&LootBeam::OnUpdate>(ev::Event::OnUpdate);
+        on<&LootBeam::OnM2Batch>(ev::Event::OnM2BatchDraw);
         on<&LootBeam::OnWorldSceneEnd>(ev::Event::OnWorldSceneEnd);
         on<&LootBeam::OnWorldEnter>(ev::Event::OnWorldEnter);
         on<&LootBeam::OnWorldLeave>(ev::Event::OnWorldLeave);
+        on<&LootBeam::OnDeviceLost>(ev::Event::OnDeviceLost);
     }
 
     void LootBeam::Log(int level, const char* fmt, ...) const
@@ -451,6 +454,8 @@ namespace wxl::scripts::loot_beam
         s.maxDistance    = ReadFloat(iniPath_, "MaxDistance",   s.maxDistance,   0.0f, 400.0f);
         s.showBeam       = ReadBool(iniPath_,  "ShowBeam",      s.showBeam);
         s.throughWalls   = ReadBool(iniPath_,  "ThroughWalls",  s.throughWalls);
+        s.depthPush      = ReadFloat(iniPath_, "DepthPush",        s.depthPush,        0.0f, 6.0f);
+        s.depthPushPerYard = ReadFloat(iniPath_, "DepthPushPerYard", s.depthPushPerYard, 0.0f, 0.2f);
         s.requireLootable= ReadBool(iniPath_,  "RequireLootable", s.requireLootable);
         s.lootColor      = ReadBool(iniPath_,  "LootColor",       s.lootColor);
         s.serverColor    = ReadBool(iniPath_,  "ServerColor",     s.serverColor);
@@ -533,6 +538,14 @@ namespace wxl::scripts::loot_beam
                 s.tiers[kTierEpic].color[2]   = 1.00f;
                 s.beamAlpha = 0.75f;
             }
+            // Version 9 restores the world-space depth pull that keeps the beacon ahead of the coarser
+            // terrain LOD at range; it was briefly replaced by a D3D9 depth bias, which DXVK scales out
+            // of all proportion, and then removed. An older file adopts the defaults.
+            if (version < 9)
+            {
+                s.depthPush        = 1.50f;
+                s.depthPushPerYard = 0.02f;
+            }
         }
 
         style_ = s;
@@ -583,6 +596,8 @@ namespace wxl::scripts::loot_beam
         WriteFloat(iniPath_, "MaxDistance",     style_.maxDistance);
         WriteInt(iniPath_,   "ShowBeam",        style_.showBeam ? 1 : 0);
         WriteInt(iniPath_,   "ThroughWalls",    style_.throughWalls ? 1 : 0);
+        WriteFloat(iniPath_, "DepthPush",        style_.depthPush);
+        WriteFloat(iniPath_, "DepthPushPerYard", style_.depthPushPerYard);
         WriteInt(iniPath_,   "RequireLootable", style_.requireLootable ? 1 : 0);
         WriteInt(iniPath_,   "LootColor",       style_.lootColor ? 1 : 0);
         WriteInt(iniPath_,   "ServerColor",     style_.serverColor ? 1 : 0);
@@ -693,6 +708,11 @@ namespace wxl::scripts::loot_beam
             if (api.UiCheckbox("Beam", &beam)) style_.showBeam = beam != 0;
             int walls = style_.throughWalls ? 1 : 0;
             if (api.UiCheckbox("Through walls", &walls)) style_.throughWalls = walls != 0;
+            if (!style_.throughWalls)
+            {
+                api.UiSliderFloat("Depth push (yd)", &style_.depthPush, 0.0f, 4.0f);
+                api.UiSliderFloat("Depth push / yd", &style_.depthPushPerYard, 0.0f, 0.1f);
+            }
             int lootable = style_.requireLootable ? 1 : 0;
             if (api.UiCheckbox("Only lootable corpses", &lootable)) style_.requireLootable = lootable != 0;
             int lootColor = style_.lootColor ? 1 : 0;
@@ -1050,6 +1070,18 @@ namespace wxl::scripts::loot_beam
             return true;
         }
 
+        // True when cover stands between the eye and a point, with at least `clearance` yards of it.
+        // A beam stands on the ground, so a trace to it almost always meets that ground right at the
+        // beam itself -- a bare hit is not occlusion. Only a hit well short of the point is.
+        bool LineBlocked(const float eye[3], const float to[3], float clearance)
+        {
+            world::WorldHit hit;
+            if (!world::TraceLine(eye, to, hit)) return false;
+            const float dx = to[0] - eye[0], dy = to[1] - eye[1], dz = to[2] - eye[2];
+            const float len = sqrtf(dx * dx + dy * dy + dz * dz);
+            return (1.0f - hit.t) * len > clearance;
+        }
+
         // The shaft: one camera-facing billboard, gridded so a colour can sit on every vertex. The
         // horizontal falloff keeps the core bright and the edges transparent; the vertical one is
         // transparent at the floating base, peaks just above it, then eases to nothing at the top.
@@ -1057,7 +1089,7 @@ namespace wxl::scripts::loot_beam
         // reduced with distance -- a far shaft is a few pixels tall, so its falloff would be lost on
         // the screen anyway -- which keeps the near look unchanged while cutting the vertex work.
         void QueueBeamColumn(const float pos[3], float bodyZ, const BeamStyle& style, float alphaScale,
-                             const float rgb[3])
+                             const float rgb[3], bool occlude)
         {
             float camera[3];
             cam::GetPosition(camera);
@@ -1081,8 +1113,11 @@ namespace wxl::scripts::loot_beam
             if (dist > 150.0f)      { rows = 4; cols = 3; }
             else if (dist > 80.0f)  { rows = 6; cols = 4; }
 
+            // minBaseZ clips the foot of the shaft up to the cover it stands behind, so the beam is
+            // always there but the buried part never draws through the hill or wall in front of it.
             const float baseZ = bodyZ + style.baseOffset;
             const float topZ  = bodyZ + fmaxf(style.height, style.baseOffset + 0.1f);
+            if (baseZ >= topZ - 0.05f) return; // cover swallows the whole shaft
 
             float      xs[kBeamMaxRows + 1][kBeamMaxCols + 1];
             float      ys[kBeamMaxRows + 1][kBeamMaxCols + 1];
@@ -1093,8 +1128,15 @@ namespace wxl::scripts::loot_beam
             {
                 const float t = float(r) / float(rows);
                 const float w = fmaxf(style.beamWidth * (1.0f - 0.55f * t), minHalfWidth);
-                const float v = BeamVertical(t);
+                float v = BeamVertical(t);
                 zs[r] = baseZ + (topZ - baseZ) * t;
+                if (occlude)
+                {
+                    // A band the eye cannot reach contributes nothing, so the shaft carries gaps
+                    // exactly where cover is in front of it instead of drawing over the cover.
+                    const float to[3] = { pos[0], pos[1], zs[r] };
+                    if (LineBlocked(camera, to, 2.0f)) v = 0.0f;
+                }
 
                 for (int c = 0; c <= cols; ++c)
                 {
@@ -1126,7 +1168,7 @@ namespace wxl::scripts::loot_beam
         // turns it into a soft ball that glows at its centre rather than a flat square. Its brightness
         // rides the mote's own flicker phase and life envelope, and it swells a touch as it brightens.
         void QueueSparkles(const float pos[3], const Sparkle* sparkles, int count,
-                           const BeamStyle& style, float alphaScale, const float rgb[3])
+                           const BeamStyle& style, float alphaScale, const float rgb[3], bool occlude)
         {
             if (count <= 0)
                 return;
@@ -1159,6 +1201,13 @@ namespace wxl::scripts::loot_beam
                 const float wx = pos[0] + sp.pos[0];
                 const float wy = pos[1] + sp.pos[1];
                 const float wz = pos[2] + sp.pos[2];
+
+                // A mote the eye cannot see is dropped, so the particles never glitter through a wall.
+                if (occlude)
+                {
+                    const float to[3] = { wx, wy, wz };
+                    if (LineBlocked(camera, to, 2.0f)) continue;
+                }
 
                 // The disc lies in the plane perpendicular to the eye->mote ray, so it reads as a
                 // round ball from any angle (the shaft's vertical billboard would foreshorten it when
@@ -1235,21 +1284,51 @@ namespace wxl::scripts::loot_beam
 
     void LootBeam::QueueBeacon(const Beacon& beacon, float alphaScale, const float rgb[3])
     {
-        beacon_gfx::SetDepth(style_.throughWalls ? gfx::Depth::Through : gfx::Depth::Tested);
+        // The scene depth surface this client exposes is not the world's, so a depth test rejects the
+        // beam everywhere; the shaft is drawn through and its foot is clipped to cover instead, so it
+        // is always present but never draws out of the ground or a wall it stands behind.
+        beacon_gfx::SetDepth(gfx::Depth::Through);
+        beacon_gfx::SetPush(0.0f, 0.0f);
 
         // The body is on the ground, so its own position is the height the shaft rises from. Using a
         // ground query for the shaft risked a bad hit on a lower surface burying it under the
         // rendered terrain, so the position of the body itself is used.
         const float baseZ = beacon.pos[2];
 
+        // Per-row line-of-sight occlusion: every band of the shaft, and every mote, traces to the eye,
+        // and whatever the eye cannot see is dropped. The beam stays (no despawn) but no part of it
+        // draws through a hill or wall. The engine's own trace is the occluder here because the scene
+        // depth surface this client exposes is not the world's.
+        const bool occlude = !style_.throughWalls;
+
+        if (occlude && occlDiag_ < 12)
+        {
+            ++occlDiag_;
+            float eye[3];
+            cam::GetPosition(eye);
+            const float bz = beacon.pos[2];
+            const float hz = bz + style_.height;
+            for (int k = 0; k < 3; ++k)
+            {
+                const float z = bz + (hz - bz) * (k / 2.0f);
+                const float to[3] = { beacon.pos[0], beacon.pos[1], z };
+                world::WorldHit hit;
+                const int ty = world::TraceLine(eye, to, hit);
+                const float dx = to[0] - eye[0], dy = to[1] - eye[1], dz = to[2] - eye[2];
+                const float len = sqrtf(dx * dx + dy * dy + dz * dz);
+                Log(WXL_LOG_INFO, "occl: z=%.1f gap=%.2f type=%d t=%.3f", z,
+                    ty ? (1.0f - hit.t) * len : -1.0f, ty, hit.t);
+            }
+        }
+
         if (style_.showBeam && style_.height > 0.01f)
-            QueueBeamColumn(beacon.pos, baseZ, style_, alphaScale, rgb);
+            QueueBeamColumn(beacon.pos, baseZ, style_, alphaScale, rgb, occlude);
 
         if (style_.showSparkles && style_.sparkleCount > 0)
         {
             int count = style_.sparkleCount;
             if (count > kMaxSparkles) count = kMaxSparkles;
-            QueueSparkles(beacon.pos, beacon.sparkles, count, style_, alphaScale, rgb);
+            QueueSparkles(beacon.pos, beacon.sparkles, count, style_, alphaScale, rgb, occlude);
         }
     }
 
@@ -1267,6 +1346,12 @@ namespace wxl::scripts::loot_beam
         beacon_gfx::Clear();
     }
 
+    void LootBeam::OnDeviceLost(const ev::DeviceResetArgs&)
+    {
+        // The depth-occlusion shader is a DEFAULT-pool resource; the device is about to free it.
+        beacon_gfx::OnDeviceLost();
+    }
+
     void LootBeam::OnUpdate(const ev::UpdateArgs& a)
     {
         ReloadConfigIfChanged();
@@ -1277,6 +1362,7 @@ namespace wxl::scripts::loot_beam
         // a frame that never reached the world scene pass would otherwise leave its shapes to pile up
         // under the next one.
         beacon_gfx::Clear();
+        haveWorldMatrices_ = false; // recapture this frame's world matrices at the M2 pass
 
         // Derive the world state live rather than trusting OnWorldEnter alone: a module loaded after
         // the client was already in-world would otherwise never see the enter event and stay dark.
@@ -1346,6 +1432,18 @@ namespace wxl::scripts::loot_beam
         }
     }
 
+    // Captured at a world draw: these are the matrices the depth buffer was written with. By the time
+    // world-scene-end fires the client has put its own screen-space matrices back, so the live device
+    // matrices are read here and handed to the beacon in the same frame.
+    void LootBeam::OnM2Batch(const ev::M2BatchDrawArgs& a)
+    {
+        if (haveWorldMatrices_) return; // fires per batch; once a frame is enough
+        gx::Device9 dev(a.device);
+        dev.GetTransform(gx::ts::kView, worldView_);
+        dev.GetTransform(gx::ts::kProjection, worldProj_);
+        haveWorldMatrices_ = true;
+    }
+
     void LootBeam::OnWorldSceneEnd(const ev::WorldSceneEndArgs& a)
     {
         if (!style_.enabled || !inWorld_ || beaconCount_ == 0)
@@ -1355,6 +1453,11 @@ namespace wxl::scripts::loot_beam
         }
 
         gx::Device9 dev(a.device);
+
+        // The live device matrices captured at the M2 pass turned out to be the client's stale ones
+        // (the beam pinned to screen centre), so placement stays on gfx::SceneMatrices, which lands
+        // the shaft correctly.
+        beacon_gfx::SetMatrices(nullptr, nullptr);
 
         // One-shot: where the first beacon lands in clip space, so a beacon that draws only up close
         // can be told apart from one the far plane or an off-screen projection is rejecting.
@@ -1401,6 +1504,39 @@ namespace wxl::scripts::loot_beam
             loggedFirstFlush_ = true;
             Log(WXL_LOG_INFO, "diag: first flush dev=%p depth=%p queued=%zu result=%ld",
                 a.device, a.sceneDepth, queued, result);
+
+            float praw = 0.0f, pbz = 0.0f, puv[2] = {};
+            if (beacon_gfx::ProbeResult(&praw, &pbz, puv))
+            {
+                const float* pj = cam::GetProjection();
+                const float d3d = pj[14] / (praw - pj[10]);
+                const float gl  = (pj[14] * 0.5f) / (praw - (1.0f + pj[10]) * 0.5f);
+                Log(WXL_LOG_INFO,
+                    "probe: uv=(%.3f,%.3f) raw=%.6f beamZ=%.2f sceneD3D=%.2f sceneGL=%.2f",
+                    puv[0], puv[1], praw, pbz, d3d, gl);
+
+                const float grid[6][2] = { { 0.5f, 0.02f }, { 0.5f, 0.25f }, { 0.5f, 0.45f },
+                                           { 0.5f, 0.65f }, { 0.5f, 0.85f }, { 0.5f, 0.98f } };
+                for (int i = 0; i < 6; ++i)
+                {
+                    const float d = beacon_gfx::ReadDepthAtUV(dev, a.sceneDepth, grid[i][0], grid[i][1]);
+                    Log(WXL_LOG_INFO, "probe grid: uv=(%.2f,%.2f) raw=%.6f scene=%.2f", grid[i][0],
+                        grid[i][1], d, pj[14] / (d - pj[10]));
+                }
+            }
+        }
+
+        if (!loggedSetup_)
+        {
+            int path = -1, vs = 0, ps = 0, tex = 0;
+            if (beacon_gfx::SetupResult(&path, &vs, &ps, &tex))
+            {
+                loggedSetup_ = true;
+                Log(WXL_LOG_INFO, "occlusion setup: path=%d vs=%d ps=%d tex=%d", path, vs, ps, tex);
+                int lv = 0, tw = 0, th = 0, tf = 0;
+                if (beacon_gfx::DepthTextureInfo(&lv, &tw, &th, &tf))
+                    Log(WXL_LOG_INFO, "depth texture: %dx%d levels=%d fmt=%d", tw, th, lv, tf);
+            }
         }
     }
 }
