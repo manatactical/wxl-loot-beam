@@ -1070,16 +1070,67 @@ namespace wxl::scripts::loot_beam
             return true;
         }
 
+        // True when a hit is cover rather than the ground the beam stands on: the eye->point segment
+        // must reach the hit with more than `clearance` yards still to run before the point.
+        bool HitIsCover(const float eye[3], const float to[3], const world::WorldHit& hit, float clearance)
+        {
+            const float hx = hit.pos.x - eye[0], hy = hit.pos.y - eye[1], hz = hit.pos.z - eye[2];
+            const float hlen = sqrtf(hx * hx + hy * hy + hz * hz);
+            const float dx = to[0] - eye[0], dy = to[1] - eye[1], dz = to[2] - eye[2];
+            const float len = sqrtf(dx * dx + dy * dy + dz * dz);
+            return len - hlen > clearance;
+        }
+
+        // Projects a world point to a device pixel and runs the engine's cursor pick through it. The
+        // pick is the only ray in the SDK that tests model geometry; the world intersect behind
+        // TraceLine tests terrain and WMO only, so a tree or a rock is invisible to it. False when the
+        // device/camera is not ready, the point is behind the eye, or the ray misses everything.
+        bool PickProjected(const float eye[3], const float to[3], world::WorldHit& hit)
+        {
+            gx::Device9 dev(gx::RawDevice());
+            if (!dev) return false;
+
+            struct Viewport { unsigned x, y, width, height; float minZ, maxZ; };
+            Viewport vp = {};
+            if (dev.GetViewport(&vp) < 0 || vp.width == 0 || vp.height == 0) return false;
+
+            const float* view = cam::GetView();
+            const float* proj = cam::GetProjection();
+            const float px = to[0] - eye[0], py = to[1] - eye[1], pz = to[2] - eye[2];
+            const float vx = px * view[0] + py * view[4] + pz * view[8] + view[12];
+            const float vy = px * view[1] + py * view[5] + pz * view[9] + view[13];
+            const float vz = px * view[2] + py * view[6] + pz * view[10] + view[14];
+            const float cw = vx * proj[3] + vy * proj[7] + vz * proj[11] + proj[15];
+            if (cw <= 1.0e-3f) return false; // behind the eye: no pixel to shoot through
+
+            const float cx = vx * proj[0] + vy * proj[4] + vz * proj[8] + proj[12];
+            const float cy = vx * proj[1] + vy * proj[5] + vz * proj[9] + proj[13];
+            const float ddcX = (0.5f * cx / cw + 0.5f) * float(vp.width);
+            const float ddcY = (0.5f - 0.5f * cy / cw) * float(vp.height);
+            return world::Pick(ddcX, ddcY, hit) != 0;
+        }
+
+        // An M2/doodad (a tree, a rock, a banner, another body) standing between the eye and a point.
+        // Only a model hit is taken: terrain and WMO are the trace below, and re-taking them here would
+        // count the ground under the beam a second time.
+        bool ModelBlocked(const float eye[3], const float to[3], float clearance)
+        {
+            world::WorldHit hit;
+            if (!PickProjected(eye, to, hit) || hit.type != 2) return false;
+            return HitIsCover(eye, to, hit, clearance);
+        }
+
         // True when cover stands between the eye and a point, with at least `clearance` yards of it.
         // A beam stands on the ground, so a trace to it almost always meets that ground right at the
         // beam itself -- a bare hit is not occlusion. Only a hit well short of the point is.
-        bool LineBlocked(const float eye[3], const float to[3], float clearance)
+        // `models` adds the model-geometry pick; it is off for the sparkles, which are small enough
+        // that the screen pick's per-mote cost is not worth hiding each one behind a tree.
+        bool LineBlocked(const float eye[3], const float to[3], float clearance, bool models)
         {
             world::WorldHit hit;
-            if (!world::TraceLine(eye, to, hit)) return false;
-            const float dx = to[0] - eye[0], dy = to[1] - eye[1], dz = to[2] - eye[2];
-            const float len = sqrtf(dx * dx + dy * dy + dz * dz);
-            return (1.0f - hit.t) * len > clearance;
+            if (world::TraceLine(eye, to, hit) && HitIsCover(eye, to, hit, clearance))
+                return true;
+            return models && ModelBlocked(eye, to, clearance);
         }
 
         // The shaft: one camera-facing billboard, gridded so a colour can sit on every vertex. The
@@ -1135,7 +1186,7 @@ namespace wxl::scripts::loot_beam
                     // A band the eye cannot reach contributes nothing, so the shaft carries gaps
                     // exactly where cover is in front of it instead of drawing over the cover.
                     const float to[3] = { pos[0], pos[1], zs[r] };
-                    if (LineBlocked(camera, to, 2.0f)) v = 0.0f;
+                    if (LineBlocked(camera, to, 2.0f, true)) v = 0.0f;
                 }
 
                 for (int c = 0; c <= cols; ++c)
@@ -1206,7 +1257,7 @@ namespace wxl::scripts::loot_beam
                 if (occlude)
                 {
                     const float to[3] = { wx, wy, wz };
-                    if (LineBlocked(camera, to, 2.0f)) continue;
+                    if (LineBlocked(camera, to, 2.0f, false)) continue;
                 }
 
                 // The disc lies in the plane perpendicular to the eye->mote ray, so it reads as a
@@ -1312,12 +1363,13 @@ namespace wxl::scripts::loot_beam
             {
                 const float z = bz + (hz - bz) * (k / 2.0f);
                 const float to[3] = { beacon.pos[0], beacon.pos[1], z };
-                world::WorldHit hit;
+                world::WorldHit hit, mhit;
                 const int ty = world::TraceLine(eye, to, hit);
+                const int my = PickProjected(eye, to, mhit) ? mhit.type : 0;
                 const float dx = to[0] - eye[0], dy = to[1] - eye[1], dz = to[2] - eye[2];
                 const float len = sqrtf(dx * dx + dy * dy + dz * dz);
-                Log(WXL_LOG_INFO, "occl: z=%.1f gap=%.2f type=%d t=%.3f", z,
-                    ty ? (1.0f - hit.t) * len : -1.0f, ty, hit.t);
+                Log(WXL_LOG_INFO, "occl: z=%.1f gap=%.2f type=%d t=%.3f mtype=%d", z,
+                    ty ? (1.0f - hit.t) * len : -1.0f, ty, hit.t, my);
             }
         }
 

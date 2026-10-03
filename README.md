@@ -147,7 +147,7 @@ with the defaults on first load.
 | `SparkleLife`, `SparkleTwinkle` | seconds a mote lives before it is reborn, and its flicker rate (default 6.0) |
 | `MaxDistance` | ignore corpses beyond this range (0 = unlimited) |
 | `ShowBeam` | draw the beam (the sparkles can still be shown without it) |
-| `ThroughWalls` | draw through terrain and walls (on by default, so a rise cannot hide the beacon) |
+| `ThroughWalls` | draw through terrain and walls (on by default, so a rise cannot hide the beacon); off hides the beam behind terrain, WMO and M2 objects (trees, rocks) while keeping it present |
 | `DepthPush`, `DepthPushPerYard` | yards the beacon is pulled toward the camera while occluded, plus extra per yard of distance, so the coarser terrain LOD at range cannot hide it |
 | `WidthPerYard` | minimum beam half-width per yard of camera distance |
 | `RequireLootable` | only beam corpses the server still flags lootable (default on) |
