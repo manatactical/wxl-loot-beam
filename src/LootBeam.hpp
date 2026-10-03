@@ -205,6 +205,9 @@ namespace wxl::scripts::loot_beam
         float          worldView_[16] = {};
         float          worldProj_[16] = {};
         bool           haveWorldMatrices_ = false;
+        // The active player's model instance, refreshed once a frame; the M2 pass matches batches
+        // against it to stamp the character's silhouette into the beam's occluder mask.
+        void*          playerModel_ = nullptr;
 
         void SeedSparkles(Beacon& b);  // fill a new beacon's mote field from its GUID
         void AdvanceSparkles(Beacon& b, float dt); // drift and respawn a beacon's motes
@@ -244,6 +247,7 @@ namespace wxl::scripts::loot_beam
         bool           loggedClipDiag_   = false;
         bool           loggedSetup_      = false;
         bool           loggedMatrices_   = false;
+        mutable int    occlDiag_         = 0;
         bool           loggedServerHint_ = false;
         int            emptyFrameStreak_ = 0;
         int            emptyWarnings_    = 0;
