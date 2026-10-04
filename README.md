@@ -5,9 +5,9 @@ A pillar of light over every corpse that can still be looted.
 Hunting for the body you just killed means squinting at a pile of grey models and reading nameplates.
 **Loot Beam** raises a beam of light straight up from every NPC body that can still be looted, so the
 one worth walking to announces itself. The beam is capped at 20 yards by default -- tall enough to spot
-across a camp or clear a low rise, short enough to stay a marker rather than a light show. It draws
-through terrain and walls by default, so a body tucked behind a rise is never missed; turn **Through
-walls** off to let the world occlude it like any other geometry.
+across a camp or clear a low rise, short enough to stay a marker rather than a light show. By default
+the world occludes it like any other geometry, so a body tucked behind a rise is hidden until you have
+line of sight; turn **Through walls** on to draw through terrain and walls instead.
 
 - a camera-facing shaft rises a little above the body and fades in from transparent there, peaking a
   short way up and easing to nothing at the top, with a horizontal falloff that keeps its edges soft
@@ -184,7 +184,7 @@ with the defaults on first load.
 | `SparkleLife`, `SparkleTwinkle` | seconds a mote lives before it is reborn, and its flicker rate (default 6.0) |
 | `MaxDistance` | ignore corpses beyond this range (0 = unlimited) |
 | `ShowBeam` | draw the beam (the sparkles can still be shown without it) |
-| `ThroughWalls` | draw through terrain and walls (on by default, so a rise cannot hide the beacon); off hides the beam behind terrain, WMO and M2 objects (trees, rocks) while keeping it present |
+| `ThroughWalls` | off by default: the world hides the beam behind terrain, WMO and M2 objects (trees, rocks) like any other geometry; on draws through terrain and walls, so a rise cannot hide the beacon |
 | `DepthPush`, `DepthPushPerYard` | yards the beacon is pulled toward the camera while occluded, plus extra per yard of distance, so the coarser terrain LOD at range cannot hide it |
 | `WidthPerYard` | minimum beam half-width per yard of camera distance |
 | `RequireLootable` | only beam corpses the server still flags lootable (default on) |
