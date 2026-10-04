@@ -1,8 +1,5 @@
 # wxl-loot-beam
 
-## EXPERIMENTAL AND TOTALLY UNSTABLE
-
-
 A pillar of light over every corpse that can still be looted.
 
 Hunting for the body you just killed means squinting at a pile of grey models and reading nameplates.
@@ -23,17 +20,84 @@ walls** off to let the world occlude it like any other geometry.
   overlay panel under **Loot Beam**;
 - with **Colour by loot rarity** on (the default), a corpse whose loot is known glows in the quality
   colour of its best item -- green for a green, purple for an epic -- instead of the default gold.
-- the companion **mod-loot-beam** server module colours a beam the instant a body dies, before anyone
-  opens it. It is **not** installed by cloning this repo or by the WXL store -- those ship only the
-  client DLL and INI -- so a server owner has to build it into AzerothCore (see **Server module**).
+
+## Installation
+
+### Client (the beacon itself)
+
+This is a WarcraftXL module. It needs the **WarcraftXL** framework, which is installed next to
+`Wow.exe` and loads modules from the client's `Extensions` folder. Nothing in this module patches the
+client or its data.
+
+**Through the WXL store:** install **Loot Beam** from the store and start the client. The store drops
+the DLL and its INI into `<client>\Extensions\wxl-loot-beam\` for you.
+
+**Manually:**
+
+1. Make sure the WarcraftXL core is installed in your client folder (`WarcraftXL.dll` next to
+   `Wow.exe`, along with the framework's own `d3d9.dll`).
+2. Create the folder `<client>\Extensions\wxl-loot-beam\`.
+3. Copy `wxl-loot-beam.dll` and `wxl-loot-beam.ini` into it. The framework discovers the folder by
+   name, so keep the folder name `wxl-loot-beam`.
+4. Launch the client. Open the WarcraftXL overlay and confirm the **Loot Beam** panel is present.
+
+The `.ini` must sit next to the DLL. It is read live while the client runs: save a change and the
+module picks it up within about a second, no restart. If the file is missing it is written with the
+defaults on first load.
+
+### Server module (optional)
+
+The companion **mod-loot-beam** AzerothCore module colours a beam the instant a body dies, before
+anyone opens it. It is **not** installed by the store or by cloning this repo -- those ship only the
+client DLL and INI -- so a server owner has to build it into the worldserver. The server half is
+entirely optional: the client still colours a corpse from the loot it learns when the loot window is
+opened without it (see **Server-driven colour**).
+
+1. Copy `server/mod-loot-beam/` into your server's `modules/` directory so it becomes
+   `<azerothcore>/modules/mod-loot-beam/`. Keep the hyphenated folder name: the loader symbol
+   `Addmod_loot_beamScripts` is derived from it.
+2. Re-run CMake and rebuild `worldserver`; the module loader picks it up automatically (no core edits
+   needed).
+3. Put `mod_loot_beam.conf` beside `worldserver.conf` (copy the `.dist`) and set
+   `LootBeam.Enable = 1`.
+4. Start `worldserver` and check the log for
+   `mod-loot-beam: server-driven loot beam colour is enabled` (it also notes
+   `UNIT_FIELD_PADDING promoted to public`).
+
+The module adds one setting, `LootBeam.Enable` (default 1), to `mod_loot_beam.conf`.
+
+If the beams only colour **after** you open a corpse, the server half is not active: confirm the log
+line in step 4 fired, that `LootBeam.Enable = 1`, and that `LootColor` and `ServerColor` are both on
+in `wxl-loot-beam.ini`.
+
+### Building from source
+
+Targets 32-bit (Win32); sources are C++20 with a static CRT. This module is staged under its
+extension id `wxl-loot-beam`.
+
+```powershell
+$core = "C:\Users\Strix\Documents\Github Projects\WXL-BUIDLER\wxl-build\wxl-core"
+$dst  = "$core\extensions\wxl-loot-beam"
+New-Item -ItemType Directory -Force -Path $dst | Out-Null
+Copy-Item ".\*" -Destination $dst -Recurse -Force
+
+cmake -S $core -B "$core\build" -A Win32
+cmake --build "$core\build" --config Release --target wxl-loot-beam --parallel
+
+# copy the DLL back into this repo, backing up any existing one first
+if (Test-Path "wxl-loot-beam.dll") { Copy-Item "wxl-loot-beam.dll" "wxl-loot-beam.dll.bak" -Force }
+Copy-Item "$core\build\Release\wxl-loot-beam.dll" "wxl-loot-beam.dll" -Force
+```
+
+The game must be closed while deploying -- the running client locks the loaded DLL.
 
 ## Loot rarity colour
 
 The beacon is tinted with the rarest item quality in the corpse's loot, using a per-tier palette
-(currency, poor and common black, uncommon green, rare `#0032FF`, epic `#9600FF`, legendary orange, artifact
-gold; each retunable in the INI or the panel). A corpse holding several items takes the colour of the
-highest quality among them, so a body with one epic and a pile of greys reads purple. A body whose
-loot is not known keeps the configured `Color`.
+(currency, poor and common black, uncommon green, rare `#0032FF`, epic `#9600FF`, legendary orange,
+artifact gold; each retunable in the INI or the panel). A corpse holding several items takes the
+colour of the highest quality among them, so a body with one epic and a pile of greys reads purple. A
+body whose loot is not known keeps the configured `Color`.
 
 The 3.3.5a client only receives a corpse's loot when loot is requested for it -- normally the loot
 window opening -- so on a stock server the quality colour appears once you have opened that body. The
@@ -43,12 +107,12 @@ module reads the loot the client already holds (via the client's own `GetNumLoot
 ### Server-driven colour
 
 To colour a beam the moment the body dies -- before anyone opens it -- run the companion
-**mod-loot-beam** module on the AzerothCore server. At creature death the server has just rolled the
-corpse's loot, so it computes the rarest item quality in it and writes that back onto the corpse's own
-`UNIT_FIELD_PADDING` update field as `quality + 1` (0 means "no hint"; 9 means the loot held money but
-no gear, the `Currency` tier). The client reads that field straight out of the object it is already
-walking, so the beacon is the right colour immediately and no custom opcode, addon message or client
-patch is involved.
+**mod-loot-beam** module (see **Server module** above). At creature death the server has just rolled
+the corpse's loot, so it computes the rarest item quality in it and writes that back onto the corpse's
+own `UNIT_FIELD_PADDING` update field as `quality + 1` (0 means "no hint"; 9 means the loot held money
+but no gear, the `Currency` tier). The client reads that field straight out of the object it is
+already walking, so the beacon is the right colour immediately and no custom opcode, addon message or
+client patch is involved.
 
 This is opt-in on the client too: with **Use server loot colour** on (the default, `ServerColor=1`)
 the server's hint and the loot the client discovers for itself are merged, and whichever holds the
@@ -72,42 +136,8 @@ the panel's **Gear tiers** section (and the `Tier.*` keys in the INI):
 
 A tier switched off produces **no beacon at all** for corpses whose rarest loot falls into it, so you
 can hide e.g. currency-only or uncommon bodies and keep the rest. Each tier's default colour is set
-in the INI and the panel (currency, poor and common ship pure black, rare `#0032FF`, epic `#9600FF`); a body
-whose loot (and so tier) is not known still uses `Color`.
-
-## Server module
-
-The companion AzerothCore module lives in this repo under `server/mod-loot-beam/`. It is **not**
-installed by cloning the client extension or by the WXL store -- those ship only the DLL and its INI
--- so the server owner has to build it into the worldserver:
-
-1. Copy `server/mod-loot-beam/` into your server's `modules/` directory so it becomes
-   `<azerothcore>/modules/mod-loot-beam/`. Keep the hyphenated folder name: the loader symbol
-   `Addmod_loot_beamScripts` is derived from it.
-2. Re-run CMake and rebuild `worldserver`; the module loader picks it up automatically (no core edits
-   needed).
-3. Put `mod_loot_beam.conf` beside `worldserver.conf` (copy the `.dist`) and set
-   `LootBeam.Enable = 1`.
-4. Start `worldserver` and check the log for
-   `mod-loot-beam: server-driven loot beam colour is enabled` (it also notes
-   `UNIT_FIELD_PADDING promoted to public`).
-
-The module adds one setting, `LootBeam.Enable` (default 1), to `mod_loot_beam.conf`.
-
-AzerothCore flags `UNIT_FIELD_PADDING` as a never-sent field, so the module promotes it to a public
-field in the core's runtime flag table when the config loads (one unused dword per unit update). That
-is what carries the hint to nearby clients without a custom opcode, an addon message or a core patch;
-it is why the module must run on the server and why a client-only install never colours a body before
-its loot window opens.
-
-The server half is optional. Without it the module still colours a corpse from the loot the client
-learns when the window opens; with it the colour -- including the money-only `Currency` tier -- is
-known the instant the body dies. The server never reads anything from the client: it only writes the
-corpse's own best-loot quality back onto that corpse.
-
-If the beams only colour **after** you open a corpse, the server half is not active: confirm the log
-line in step 4 fired, that `LootBeam.Enable = 1`, and that `LootColor` and `ServerColor` are both on
-in `wxl-loot-beam.ini`.
+in the INI and the panel (currency, poor and common ship pure black, rare `#0032FF`, epic `#9600FF`); a
+body whose loot (and so tier) is not known still uses `Color`.
 
 ## How it works
 
@@ -124,6 +154,12 @@ behind it) with a colour on every vertex, so the GPU interpolates the falloffs a
 read as a soft volume. The shaft is one camera-facing billboard, gridded across its width and up
 its height so its horizontal and vertical falloffs read as light rather than a slab.
 
+AzerothCore flags `UNIT_FIELD_PADDING` as a never-sent field, so the server module promotes it to a
+public field in the core's runtime flag table when the config loads (one unused dword per unit
+update). That is what carries the loot hint to nearby clients without a custom opcode, an addon
+message or a core patch; it is why the module must run on the server and why a client-only install
+never colours a body before its loot window opens.
+
 ## Tuning
 
 The look lives in `wxl-loot-beam.ini` next to the DLL. The file is read live: save a change and the
@@ -133,6 +169,7 @@ with the defaults on first load.
 
 | Key | Meaning |
 |---|---|
+| `Enabled` | master switch: 1 draws beacons, 0 leaves corpses unmarked |
 | `Height` | how far the beam rises, yards (default 20) |
 | `BaseOffset` | how far above the body the shaft begins, yards (default 1) |
 | `BeamWidth` | half-width of the beam at its base (default 0.5) |
@@ -162,8 +199,8 @@ with the defaults on first load.
   to 0 to mark every dead NPC instead. If the flags field cannot be trusted on a given client build it
   falls back to the health-only verdict rather than turning into noise.
 - Loot quality is only known for a body the client has been sent loot for, unless the server runs
-  the companion **mod-loot-beam** module (see **Server-driven colour** above). The module does not
-  request loot itself: it never asks the server for anything and never opens the loot window.
+  the companion **mod-loot-beam** module. The module does not request loot itself: it never asks the
+  server for anything and never opens the loot window.
 - Player corpses are left alone -- this marks NPC bodies.
 - Purely visual: the module sends nothing to the server, and on a stock server the server never
   learns the beams exist. When the companion server module is present it only writes the corpse's own
