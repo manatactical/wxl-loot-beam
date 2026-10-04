@@ -156,10 +156,13 @@ namespace wxl::scripts::loot_beam
             sp.twinkleSpeed = style.sparkleTwinkle * (0.6f + 0.8f * Random01(rng));
 
             // Spread the field over most of the beam's height so a tall marker is not just a hot
-            // base; the initial age is applied to the offset so the fade is desynced too.
+            // base; the initial age is applied to the offset so the fade is desynced too. The
+            // birth height is biased low -- min of three uniforms is a quadratic falloff -- so motes
+            // are born progressively less often the higher they are, denser at the foot than the crest.
+            const float h = fminf(fminf(Random01(rng), Random01(rng)), Random01(rng));
             sp.pos[0] = cosf(ang) * rad + sp.vel[0] * sp.age;
             sp.pos[1] = sinf(ang) * rad + sp.vel[1] * sp.age;
-            sp.pos[2] = style.baseOffset + span * 0.85f * Random01(rng) + sp.vel[2] * sp.age;
+            sp.pos[2] = style.baseOffset + span * 0.85f * h + sp.vel[2] * sp.age;
         }
 
         // Drifts one mote and respawns it once it has outlived its life or climbed out of the beam.
