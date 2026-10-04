@@ -22,7 +22,7 @@
     "title": "Loot Beam",
     "tagline": "A pillar of light over every corpse that can still be looted.",
     "description": "store/description.md",
-    "gallery": [],
+    "gallery": ["screenshot.jpg"],
     "categories": ["rendering", "gameplay"],
     "accent": "#ffd070"
   },

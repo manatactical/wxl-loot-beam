@@ -2,6 +2,8 @@
 
 A pillar of light over every corpse that can still be looted.
 
+![A loot beam rising from a corpse](screenshot.jpg)
+
 Hunting for the body you just killed means squinting at a pile of grey models and reading nameplates.
 **Loot Beam** raises a beam of light straight up from every NPC body that can still be looted, so the
 one worth walking to announces itself. The beam is capped at 20 yards by default -- tall enough to spot

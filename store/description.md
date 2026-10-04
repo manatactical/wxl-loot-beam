@@ -1,3 +1,5 @@
+![A loot beam rising from a corpse](../screenshot.jpg)
+
 Stop hunting for the body you just killed. **Loot Beam** raises a pillar of light over every NPC corpse
 that can still be looted, so the one worth walking to stands out from across the camp.
 
